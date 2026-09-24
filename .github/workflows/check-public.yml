@@ -2,9 +2,9 @@ name: check-public
 # Server-side publication check, run on every push and pull request so it
 # cannot be skipped locally: no public IP addresses, MAC addresses, personal
 # e-mail addresses, and no private names from the deny list. The deny list is
-# never published: CI reads it from the encrypted PUBLISH_DENY secret. Where the
-# secret is not available (pull requests from forks), the check still runs
-# without it.
+# never published: CI reads it from the encrypted PUBLISH_DENY secret. Only a
+# pull request from a fork (which never receives secrets) runs without it; a
+# missing secret anywhere else fails the job.
 on: [push, pull_request]
 permissions:
   contents: read
@@ -23,6 +23,14 @@ jobs:
           printf '%s\n' "$PUBLISH_DENY" > .publish-deny
           python3 tools/check-public.py --all
           rm -f .publish-deny
-      - name: check, without the deny list (secret not available)
-        if: env.PUBLISH_DENY == ''
+      # Without the secret, only a pull request from a fork may run the check
+      # without the deny list (forks never receive secrets). Anywhere else a
+      # missing secret means the repository is misconfigured: fail.
+      - name: check, without the deny list (pull request from a fork)
+        if: env.PUBLISH_DENY == '' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
         run: python3 tools/check-public.py --all --no-deny-list
+      - name: refuse to run without the deny list
+        if: env.PUBLISH_DENY == '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
+        run: |
+          echo "The PUBLISH_DENY secret is not configured; refusing to report clean without the deny list." >&2
+          exit 1

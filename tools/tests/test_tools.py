@@ -52,6 +52,29 @@ def test_parse():
     expect("parse: real timeout", k == "timed_out", f"got {k}")
 
 
+def test_logging():
+    m = load_harness()
+    # log() reports success and failure explicitly.
+    expect("log: returns True when written", m.log({"event": "unit"}) is True)
+    saved = m.LOG
+    m.LOG = "/nonexistent-dir/log.jsonl"
+    expect("log: returns False when it cannot write", m.log({"event": "unit"}) is False)
+    m.LOG = saved
+    # A command is never run when its start entry cannot be logged.
+    ran = []
+    m.remote_call = lambda *a, **k: ran.append(a) or ("", "", 0)
+    m.log = lambda entry: False
+    r = m.run("true")
+    expect("run: nothing runs without a start log entry", r["kind"] == "harness_error" and not ran, str(r))
+    # A result whose end entry cannot be logged is marked, and shown as an error.
+    m.log = lambda entry: entry.get("event") == "start"
+    m.remote_call = lambda *a, **k: (f"{m.START}\nok\n\n{m.END} 0\n", "", 0)
+    r = m.run("true")
+    body, is_error = m.render(r)
+    expect("run: unlogged result is marked", r.get("unlogged") is True and "could NOT be written" in r["stderr"], str(r))
+    expect("render: unlogged result is an error", is_error is True, body)
+
+
 def run_checker(text, *flags):
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
         f.write(text)
@@ -100,6 +123,7 @@ def test_checker():
 
 if __name__ == "__main__":
     test_parse()
+    test_logging()
     test_checker()
     print(f"\n{failures} failure(s)")
     sys.exit(1 if failures else 0)
