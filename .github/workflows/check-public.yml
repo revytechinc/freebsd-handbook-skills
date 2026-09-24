@@ -1,7 +1,9 @@
 name: check-public
-# Server-side copy of the pre-commit check: no public addresses, MAC addresses,
-# personal e-mail addresses. Runs on every push and pull request, so it cannot
-# be skipped locally. The private name list is not published, so CI runs
+# Server-side publication check, run on every push and pull request so it
+# cannot be skipped locally: no public IP addresses, MAC addresses, personal
+# e-mail addresses, and no private names from the deny list. The deny list is
+# never published: CI reads it from the encrypted PUBLISH_DENY secret. Where the
+# secret is not available (pull requests from forks), the check still runs
 # without it.
 on: [push, pull_request]
 permissions:
@@ -9,6 +11,18 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      PUBLISH_DENY: ${{ secrets.PUBLISH_DENY }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, pinned by commit
-      - run: python3 tools/check-public.py --all --no-deny-list
+      - name: regression tests for the safety tooling
+        run: python3 tools/tests/test_tools.py
+      - name: check, with the private deny list
+        if: env.PUBLISH_DENY != ''
+        run: |
+          printf '%s\n' "$PUBLISH_DENY" > .publish-deny
+          python3 tools/check-public.py --all
+          rm -f .publish-deny
+      - name: check, without the deny list (secret not available)
+        if: env.PUBLISH_DENY == ''
+        run: python3 tools/check-public.py --all --no-deny-list

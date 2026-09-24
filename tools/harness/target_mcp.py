@@ -165,9 +165,10 @@ def verify_target():
 
 def parse(out, err, status, began):
     """Classify a finished call from its start/end markers."""
-    if not out.startswith(START + "\n"):
+    at = out.find(START + "\n")
+    if at < 0:
         return "transport_error", status, out, err
-    out = out[len(START) + 1:]
+    out = out[at + len(START) + 1:]  # anything before the marker is login-shell noise
     body, _, last = out.rstrip("\n").rpartition("\n")
     fields = last.split(" ")
     if len(fields) != 2 or fields[0] != END or not fields[1].isdigit():
@@ -196,7 +197,9 @@ def run(command):
     out, err, status = remote_call(inner, TIMEOUT + 60)
     kind, status, out, err = parse(out, err, status, began)
     res = {"kind": kind, "exit_status": status, "stdout": out, "stderr": err}
-    log({"event": "end", "command": command, **res})
+    if not log({"event": "end", "command": command, **res}):
+        res["stderr"] += "\n(harness: this result could NOT be written to the evidence log)"
+        res["unlogged"] = True
     return res
 
 
@@ -210,14 +213,15 @@ def render(r):
     if r["kind"] == "harness_error":
         return f"HARNESS ERROR: {r['stderr']}", True
     if r["kind"] == "transport_error":
-        return ("TRANSPORT ERROR: the command did NOT run on the test machine (could not reach it).\n"
+        return ("TRANSPORT ERROR: the start marker was never seen, so the command most likely did not "
+                "start on the test machine (could not reach it).\n"
                 f"exit_status: {r['exit_status']}\n--- stderr ---\n{err}"), True
     if r["kind"] == "transport_lost":
         return ("TRANSPORT LOST: the command started on the test machine but the connection ended "
                 "before it finished; its result is unknown.\n--- stdout so far ---\n"
                 f"{clip(r['stdout'], REPLY_LIMIT, 'stdout')}\n--- stderr ---\n{err}"), True
     return (f"exit_status: {r['exit_status']}\n--- stdout ---\n{clip(r['stdout'], REPLY_LIMIT, 'stdout')}\n"
-            f"--- stderr ---\n{err}"), r["exit_status"] != 0
+            f"--- stderr ---\n{err}"), r["exit_status"] != 0 or r.get("unlogged", False)
 
 
 def reply(rid, body, is_error):

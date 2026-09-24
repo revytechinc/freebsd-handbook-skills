@@ -10,8 +10,8 @@ non-zero if any of them contains:
     100.64/10, 127/8, 169.254/16, fe80::/10, fc00::/7, ::1, 0.0.0.0,
     255.255.255.255, multicast), or a netmask-shaped value (255.x.x.x);
   - a MAC address other than the RFC 7042 documentation block 00:00:5e:00:53:xx;
-  - an e-mail address outside example.org / example.com / example.net and the
-    FreeBSD project's own public addresses;
+  - an e-mail address outside example.org / example.com / example.net, other
+    than a few named FreeBSD project role addresses;
   - a name listed in the private deny file (.publish-deny, one entry per line,
     git-ignored so the list itself is never published).
 
@@ -31,10 +31,16 @@ ALLOWED_NETS = [ipaddress.ip_network(n) for n in (
     "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",  # NOSONAR python:S1313 -- special-purpose (allow-list)
     "0.0.0.0/32", "255.255.255.255/32", "224.0.0.0/4",  # NOSONAR python:S1313 -- special-purpose (allow-list)
     "::1/128", "::/128", "fe80::/10", "fc00::/7", "ff00::/8")]
-ALLOWED_MAIL_DOMAINS = ("example.org", "example.com", "example.net", "freebsd.org")
+ALLOWED_MAIL_DOMAINS = ("example.org", "example.com", "example.net")
+# The FreeBSD project's public role addresses (never individual people's).
+ALLOWED_MAIL_ADDRESSES = ("freebsd-questions@freebsd.org", "security-officer@freebsd.org",
+                          "secteam@freebsd.org", "doc@freebsd.org", "ports@freebsd.org",
+                          "bugmeister@freebsd.org", "webmaster@freebsd.org")
 DOC_MAC_PREFIXES = ("00:00:5e:00:53:", "00-00-5e-00-53-")          # RFC 7042
 
-IPV4 = re.compile(r"(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?:/\d{1,2})?(?![\w.])")
+# The lookahead lets a sentence end right after an address ("... 8.8.8.8.")
+# while still refusing to match inside a longer dotted number.
+IPV4 = re.compile(r"(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?:/\d{1,2})?(?!\w|\.\d)")
 MAX_ADDR = 45  # longest textual IPv6 address
 # Anything that could be IPv6: a run of hex digits and colons with at least two
 # colons. ipaddress decides whether it really is one.
@@ -44,7 +50,8 @@ MAC = re.compile(r"(?<![\w:-])((?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})(?![\w:-]
 MAIL = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SKIP = ("check-public.py", ".publish-deny")  # the checker's own allow-list and the deny list
+SELF = "tools/check-public.py"   # its own allow-list would trip it; skipped by exact path only
+DENY_FILE = ".publish-deny"      # must never be committed
 
 
 def git_names(*args):
@@ -116,6 +123,8 @@ def mail_problems(line):
         dom = m.group(1).lower()
         if IPV4.fullmatch(dom):
             continue  # user@<IPv4> is an ssh destination; the IP check judges the address
+        if m.group(0).lower() in ALLOWED_MAIL_ADDRESSES:
+            continue
         if not any(dom == d or dom.endswith("." + d) for d in ALLOWED_MAIL_DOMAINS):
             out.append(f"e-mail address {m.group(0)}")
     return out
@@ -135,10 +144,21 @@ def check(content, deny):
     return problems
 
 
+FLAGS = ("--all", "--no-deny-list")
+
+
 def targets(argv):
     """(display name, content) for everything to check."""
+    unknown = [a for a in argv if a.startswith("--") and a not in FLAGS]
+    if unknown:
+        print(f"check-public: unknown option(s) {unknown}; known: {list(FLAGS)}", file=sys.stderr)
+        sys.exit(2)
     if "--all" in argv:
-        return [(n, disk_text(os.path.join(ROOT, n))) for n in git_names("ls-files")]
+        names = git_names("ls-files")
+        if not names:
+            print("check-public: --all found no tracked files; refusing to report clean", file=sys.stderr)
+            sys.exit(2)
+        return [(n, disk_text(os.path.join(ROOT, n))) for n in names]
     paths = [a for a in argv if not a.startswith("--")]
     if paths:
         return [(os.path.relpath(os.path.abspath(p), ROOT), disk_text(p)) for p in paths]
@@ -151,7 +171,11 @@ def main():
     files = targets(argv)
     bad = 0
     for name, content in files:
-        if os.path.basename(name) in SKIP:
+        if os.path.basename(name) == DENY_FILE:
+            print(f"{name}: the private deny list must never be committed")
+            bad += 1
+            continue
+        if name == SELF:
             continue
         for n, what in check(content, deny):
             print(f"{name}:{n}: {what}")
