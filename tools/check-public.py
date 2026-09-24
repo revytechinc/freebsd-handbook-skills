@@ -45,7 +45,9 @@ MAX_ADDR = 45  # longest textual IPv6 address
 # Anything that could be IPv6: a run of hex digits and colons with at least two
 # colons. ipaddress decides whether it really is one.
 # (dots included, for an embedded IPv4 tail such as ::ffff:192.0.2.1)
-IPV6_CANDIDATE = re.compile(r"(?<![\w.])([0-9A-Fa-f:.]{2,})(?:/\d{1,3})?")
+# Not followed by a word character: "::error::" (a CI annotation) holds
+# "::e", which is a syntactically valid address but plainly not one.
+IPV6_CANDIDATE = re.compile(r"(?<![\w.])([0-9A-Fa-f:.]{2,})(?:/\d{1,3})?(?!\w)")
 MAC = re.compile(r"(?<![\w:-])((?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})(?![\w:-])")
 MAIL = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)")
 

@@ -16,7 +16,7 @@ Status is one of:
 | [introduction](https://docs.freebsd.org/en/books/handbook/introduction/) Chapter 1. Introduction | 3 | 0 | planned | |
 | [bsdinstall](https://docs.freebsd.org/en/books/handbook/bsdinstall/) Chapter 2. Installing FreeBSD | 10 | 0 | planned | |
 | [basics](https://docs.freebsd.org/en/books/handbook/basics/) Chapter 3. FreeBSD Basics | 12 | 0 | planned | |
-| [ports](https://docs.freebsd.org/en/books/handbook/ports/) Chapter 4. Installing Applications: Packages and Ports | 8 | 0 | planned | |
+| [ports](https://docs.freebsd.org/en/books/handbook/ports/) Chapter 4. Installing Applications: Packages and Ports | 8 | 1 | in progress | |
 | [x11](https://docs.freebsd.org/en/books/handbook/x11/) Chapter 5. The X Window System | 6 | 0 | planned | |
 | [wayland](https://docs.freebsd.org/en/books/handbook/wayland/) Chapter 6. Wayland | 9 | 0 | planned | |
 | [network](https://docs.freebsd.org/en/books/handbook/network/) Chapter 7. Network | 7 | 0 | planned | |

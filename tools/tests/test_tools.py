@@ -61,6 +61,7 @@ def test_logging():
     expect("log: returns False when it cannot write", m.log({"event": "unit"}) is False)
     m.LOG = saved
     # A command is never run when its start entry cannot be logged.
+    real_log, real_call = m.log, m.remote_call
     ran = []
     m.remote_call = lambda *a, **k: ran.append(a) or ("", "", 0)
     m.log = lambda entry: False
@@ -73,6 +74,7 @@ def test_logging():
     body, is_error = m.render(r)
     expect("run: unlogged result is marked", r.get("unlogged") is True and "could NOT be written" in r["stderr"], str(r))
     expect("render: unlogged result is an error", is_error is True, body)
+    m.log, m.remote_call = real_log, real_call  # leave the module as it was
 
 
 def run_checker(text, *flags):
@@ -110,6 +112,7 @@ def test_checker():
         "documentation MAC": "00:00:5e:00:53:01",
         "ssh to a documentation address": "ssh root@192.0.2.10",
         "IPv4-mapped localhost": "::ffff:127.0.0.1",
+        "CI annotation syntax": 'echo "::error::Fork pull request" and "::warning::x"',
     }
     for name, text in must_fail.items():
         rc, out = run_checker(text)

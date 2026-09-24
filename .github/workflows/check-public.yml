@@ -28,7 +28,10 @@ jobs:
       # missing secret means the repository is misconfigured: fail.
       - name: check, without the deny list (pull request from a fork)
         if: env.PUBLISH_DENY == '' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
-        run: python3 tools/check-public.py --all --no-deny-list
+        run: |
+          python3 tools/check-public.py --all --no-deny-list
+          echo "::error::Fork pull request: only the partial check (without the private deny list) could run. A maintainer must check this change with the full list before merging."
+          exit 1
       - name: refuse to run without the deny list
         if: env.PUBLISH_DENY == '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
         run: |
