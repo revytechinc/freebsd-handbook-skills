@@ -6,6 +6,7 @@
 Covers:
   - target_mcp.parse(): how a command's result is classified from the start and
     end markers (ran / failed / timed out / never started / connection lost).
+  - run-skill.said_done(): reading the model's DONE / FAILED verdict.
   - check-public.py: that planted addresses, MACs, e-mail addresses are caught
     and that legitimate text is not.
 """
@@ -77,6 +78,50 @@ def test_logging():
     m.log, m.remote_call = real_log, real_call  # leave the module as it was
 
 
+def test_said_done():
+    spec = importlib.util.spec_from_file_location("run_skill", os.path.join(TOOLS, "harness", "run-skill.py"))
+    rs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rs)  # module level defines only; main() is not run
+    summary = "\n".join(f"{i}. step {i} matched" for i in range(60))
+    cases = [
+        ("plain DONE", "All steps matched.\n\nDONE", True),
+        ("markdown **DONE**", "Verified.\n\n**DONE**", True),
+        ("DONE followed by a long summary", "**DONE**\n\n" + summary, True),
+        ("**DONE** followed by text on the same line", "Checked.\n\n**DONE** - All steps completed.", True),
+        ("DONE - summary", "---\n\nDONE - All steps matched the expected behavior.", True),
+        ("lowercase done in quoted output only", "Extracting curl-8.22.0: .......... done\nexit=0", False),
+        ("DONE inside a sentence only", "I am DONE with step 2 and stopped.", False),
+        ("FAILED", "Step 3 did not match.\n\nFAILED at step 3", False),
+        ("NOT DONE", "**NOT DONE**", False),
+        ("DONE line but FAILED elsewhere", "FAILED at step 2, retried.\n\nDONE", False),
+        ("DONE line but lowercase failed elsewhere", "Step 3 failed, but it is installed.\n\nDONE", False),
+        ("empty", "", False),
+    ]
+    for name, text, want in cases:
+        expect(f"said_done: {name}", rs.said_done(text) is want)
+    exp = ["RESULT: curl 8.22.0"]
+    answers = [
+        ("exact line", "Done.\n\nRESULT: curl 8.22.0\n\nDONE", True),
+        ("bold line", "**RESULT: curl 8.22.0**\nDONE", True),
+        ("in backticks", "`RESULT: curl 8.22.0`", True),
+        ("bold label only", "**RESULT:** curl 8.22.0", True),
+        ("as a list item", "- RESULT: curl 8.22.0", True),
+        ("as a numbered item", "4. RESULT: curl 8.22.0", True),
+        ("underscore emphasis", "__RESULT: curl 8.22.0__", True),
+        ("hedged with a second answer", "RESULT: curl 8.22.0\nRESULT: curl 8.22.0_1", False),
+        ("hedged with not available", "RESULT: curl 8.22.0\nRESULT: curl not available", False),
+        ("longer version", "RESULT: curl 8.22.0_1", False),
+        ("inside a sentence", "I think RESULT: curl 8.22.0 is right", False),
+        ("absent", "DONE", False),
+    ]
+    for name, text, ok in answers:
+        expect(f"answer check: {name}", (rs.answer_missing(exp, text) == []) is ok)
+    base = {"already_satisfied_before": False, "verify_exit": 0, "verified": True}
+    expect("verdict: verified", rs.verdict(base) == ("VERIFIED", 0))
+    expect("verdict: answer missing is not verified", rs.verdict({**base, "verified": False})[1] == 1)
+    expect("verdict: pre-existing end state", rs.verdict({**base, "already_satisfied_before": True})[1] == 3)
+
+
 def run_checker(text, *flags):
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
         f.write(text)
@@ -142,5 +187,6 @@ if __name__ == "__main__":
     test_parse()
     test_logging()
     test_checker()
+    test_said_done()
     print(f"\n{failures} failure(s)")
     sys.exit(1 if failures else 0)

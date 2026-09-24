@@ -13,7 +13,10 @@ Copy everything from the `---` line down into
    skills. If a step says "then, if you also want X", X is its own skill.
 2. **Every command is complete and copy-pasteable.** No `<placeholders>` inside a
    command, unless the Inputs table defines the placeholder and says exactly
-   what to substitute.
+   what to substitute. Inputs are pasted into root commands, so the skill
+   states the characters each input may contain and says to stop if it
+   contains anything else. An Undo removes only what the skill created, never
+   a whole user-supplied path.
 3. **Every command is followed by what to expect.** Give the exact output, or
    the one line that must appear, and what to do if it does not.
 4. **No "edit the file".** Every file change is made by a command (`sysrc`,

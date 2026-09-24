@@ -1,0 +1,2 @@
+PACKAGE=nginx-lite
+DIR=/root/packages

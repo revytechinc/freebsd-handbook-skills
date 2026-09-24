@@ -11,7 +11,10 @@ Steps:
   2. Run the model with the skill text and exactly one tool, run_on_target
      (target_mcp.py), from an empty directory, with no other context.
   3. Run the skill's own verify.sh on the target, independently of the model.
-     The model's opinion of its own success is never the result.
+     The model's opinion of its own success is never the result. A skill that
+     only reports something (a search, a query) also has answer.sh: it prints
+     the true answer, computed on the target independently of the model, and
+     every line it prints must appear in the model's final message.
   4. Write the transcript and verdict under .work/runs/ (private: run logs
      contain details of the test infrastructure).
 
@@ -21,10 +24,15 @@ Targets are described in the private file .work/targets.json:
                "ssh": "ssh -F /path/.work/ssh_config 192.0.2.71",
                "reset": ["ssh", "adminhost", "doas", "..."]}}
 
-A run is VERIFIED only when BOTH hold: the model finished normally and said
-DONE (not FAILED, not NOT DONE), AND the skill's verify.sh passes afterwards.
+If the skill directory has test-inputs.txt, its lines (such as
+"PACKAGE=nginx-lite") are given to the model as the skill's inputs, the way a
+person asking for the task would give them.
+
+A run is VERIFIED only when ALL hold: the model finished normally and said
+DONE (not FAILED, not NOT DONE), the skill's verify.sh passes afterwards, and,
+if the skill has answer.sh, the model's final message contains its answer.
 verify.sh is also run once BEFORE the model: if it already passes, the result
-is recorded as "already satisfied", so a skill whose end state existed from the
+is recorded as VERIFIED-NO-OP (exit 3), so a skill whose end state existed from the
 start is never mistaken for one the model achieved.
 
 Exit status:
@@ -62,6 +70,11 @@ You are given a skill: step-by-step instructions for one task. Follow it exactly
   that is a problem with the test setup, not with the skill.
 When you finish, say DONE if every step and the skill's Verify step matched,
 otherwise say FAILED and name the step where it went wrong."""
+
+
+class HarnessError(Exception):
+    """A problem with the test set-up found after the model ran: the run is
+    recorded (result.json) as a harness error, never as a verdict."""
 
 
 def die(msg, code=2):
@@ -114,7 +127,7 @@ def reset(target, name):
         die(f"{name} did not come back with its marker after the reset")
 
 
-def run_model(skill_text, target, name, log_path, transcript_path):
+def run_model(skill_text, inputs, target, name, log_path, transcript_path):
     mcp = {"mcpServers": {"target": {
         "type": "stdio", "command": sys.executable,
         "args": [os.path.join(ROOT, "tools", "harness", "target_mcp.py")],
@@ -125,6 +138,8 @@ def run_model(skill_text, target, name, log_path, transcript_path):
             json.dump(mcp, f)
         prompt = ("Here is the skill to follow on the test machine. Follow it exactly.\n\n"
                   "=== SKILL ===\n" + skill_text + "\n=== END OF SKILL ===")
+        if inputs:
+            prompt += "\n\nUse these values for the skill's inputs:\n" + inputs
         argv = ["claude", "-p", "--model", MODEL, "--setting-sources", "", "--tools", "",
                 "--mcp-config", cfg, "--strict-mcp-config",
                 "--allowedTools", "mcp__target__run_on_target", "--permission-mode", "dontAsk",
@@ -153,17 +168,26 @@ def final_text(transcript_path):
     return last
 
 
+# The verdict: a line that STARTS with DONE, allowing markdown decoration
+# ("**DONE**", "## DONE") and a summary after it ("**DONE** - all steps
+# matched"). Case-sensitive: quoted command output is full of a lowercase
+# "done" ("Extracting curl: ... done"), which is not a verdict.
+DONE_LINE = re.compile(r"^[\s*_`#>]*DONE(?![\w-])", re.M)
+
+
 def said_done(text):
-    """True when the model's final message reports DONE and not FAILED.
-    Models decorate the word (**DONE**, `DONE`), so match it as a word."""
-    tail = text[-400:].upper()
-    if re.search(r"\bFAILED\b", tail) or re.search(r"\bNOT\s+DONE\b", tail):
+    """True when the model's final message has a line starting with DONE and says
+    FAILED / NOT DONE nowhere. The whole message is read: models often write a
+    summary after the verdict, and a fixed-size tail missed DONE."""
+    # Any "failed" / "not done", in any case, vetoes: this can only reject a
+    # correct run (e.g. one quoting "Failed to fetch"), never accept a bad one.
+    if re.search(r"\bFAILED\b", text, re.I) or re.search(r"\bNOT\s+DONE\b", text, re.I):
         return False
-    return bool(re.search(r"\bDONE\b", tail))
+    return bool(DONE_LINE.search(text))
 
 
 def run_verify(target, verify):
-    """Run verify.sh on the target over stdin; return the CompletedProcess.
+    """Run verify.sh (or answer.sh) on the target over stdin; return the CompletedProcess.
     Not reaching the target (ssh exit 255, timeout) is an infrastructure
     failure, never a verdict about the skill."""
     try:
@@ -236,9 +260,52 @@ def report(result, run_dir):
               f"{result['model_stderr'].strip()[-200:]}; run: {run_dir}")
         return 2
     label, code = verdict(result)
+    answer = ""
+    if result["expected_answer"]:
+        answer = "; answer " + (f"MISSING {result['answer_missing']}" if result["answer_missing"] else "matched")
     print(f"{label}  {where}; model said {'DONE' if result['model_said_done'] else 'not DONE'}; "
-          f"verify {'passed' if result['verify_exit'] == 0 else 'FAILED'}; run: {run_dir}")
+          f"verify {'passed' if result['verify_exit'] == 0 else 'FAILED'}{answer}; run: {run_dir}")
     return code
+
+
+def answer_missing(expected, said):
+    """Expected answer lines that are not a whole line of the model's final
+    message. Markdown decoration around a line is ignored, but the line itself
+    must match exactly: "RESULT: curl 8.22.0" does not match
+    "RESULT: curl 8.22.0_1"."""
+    lines = set()
+    for l in (said or "").splitlines():
+        l = re.sub(r"[*`]", "", l).strip()
+        l = re.sub(r"^(?:[#>]+|[-+]|\d+[.)])\s*", "", l).strip()  # heading, quote, list marker
+        lines.add(l.strip("_").strip())  # _emphasis_ at the ends only: names may contain "_"
+    missing = [e for e in expected if e not in lines]
+    # A hedged answer (the right RESULT: line plus a different one) is not an answer.
+    labels = {e.split(":", 1)[0] + ":" for e in expected if ":" in e}
+    others = sorted(l for l in lines if any(l.startswith(p) for p in labels) and l not in expected)
+    return missing + [f"(also answered: {o})" for o in others]
+
+
+def check_answer(target, name, answer, skill_text, said, verify_exit):
+    """(expected, missing) answer lines; both empty when the skill has no
+    answer.sh. answer.sh computes the true answer on the target without the
+    model; each line must appear in the model's final message."""
+    if not os.path.isfile(answer):
+        return [], []
+    a = run_verify(target, answer)
+    if a.returncode == 0 and a.stdout.strip():
+        expected = [l.strip() for l in a.stdout.splitlines() if l.strip()]
+        copyable = [l for l in expected if l in skill_text]
+        if copyable:
+            raise HarnessError(f"the expected answer {copyable} appears word for word in the skill, so a model "
+                               "could copy it without doing the task; use test inputs that differ from the skill's examples")
+        return expected, answer_missing(expected, said)
+    if verify_exit != 0:
+        # The answer depends on state the model should have created, and
+        # verify.sh already failed: a failed run, not a broken harness.
+        note = ["(answer.sh could not compute an answer: verify.sh failed)"]
+        return note, note
+    raise HarnessError(f"answer.sh could not compute the answer on {name} although verify.sh passed "
+                       f"(exit {a.returncode}): {(a.stdout + a.stderr).strip()[-200:]}; fix answer.sh")
 
 
 def main():
@@ -247,6 +314,11 @@ def main():
     for p in (skill_md, verify):
         if not os.path.isfile(p):
             die(f"missing {p}")
+    answer = os.path.join(skill_dir, "answer.sh")
+    with open(skill_md) as f:
+        skill_text = f.read()
+    if "RESULT:" in skill_text and not os.path.isfile(answer):
+        die("the skill reports a RESULT: line but has no answer.sh to check it against; add answer.sh")
     target = load_target(name)
     prepare(target, name, skill_dir, do_reset)
 
@@ -256,19 +328,28 @@ def main():
     os.makedirs(run_dir)
     log_path, transcript = os.path.join(run_dir, "commands.jsonl"), os.path.join(run_dir, "transcript.jsonl")
 
-    with open(skill_md) as f:
-        rc, err = run_model(f.read(), target, name, log_path, transcript)
+    inputs_file = os.path.join(skill_dir, "test-inputs.txt")
+    inputs = open(inputs_file).read().strip() if os.path.isfile(inputs_file) else ""
+    rc, err = run_model(skill_text, inputs, target, name, log_path, transcript)
     said = final_text(transcript)
     model_ok = rc == 0 and said is not None
     done = model_ok and said_done(said)
     after = run_verify(target, verify)  # independent of the model
+    try:
+        expected, missing = check_answer(target, name, answer, skill_text, said, after.returncode)
+    except HarnessError as e:
+        with open(os.path.join(run_dir, "result.json"), "w") as f:
+            json.dump({"skill": os.path.relpath(skill_dir, ROOT), "target": name, "time_utc": stamp,
+                       "harness_error": str(e), "verified": False}, f, indent=2)
+        die(f"{e}; run: {run_dir}")
     result = {
         "skill": os.path.relpath(skill_dir, ROOT), "target": name, "release": target.get("release"),
         "model": MODEL, "time_utc": stamp, "model_exit": rc, "model_stderr": err,
         "model_finished": model_ok, "model_said_done": done,
         "already_satisfied_before": before.returncode == 0, "verify_before": before.stdout[-1000:],
         "verify_exit": after.returncode, "verify_stdout": after.stdout[-4000:], "verify_stderr": after.stderr[-2000:],
-        "verified": done and after.returncode == 0,
+        "inputs": inputs, "expected_answer": expected, "answer_missing": missing,
+        "verified": done and after.returncode == 0 and not missing,
     }
     sys.exit(report(result, run_dir))
 

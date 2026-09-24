@@ -10,6 +10,14 @@ Each skill names that commit in `handbook_commit` and links to the section.
 
 ## 2. Run every step before writing it
 
+Test systems are contained: they sit on an isolated network whose only way
+out is a gateway that allows the FreeBSD package and update servers and
+nothing else. Nothing leaves them except requests to those FreeBSD servers
+(which include the normal pkg and update client details, such as the
+release's ABI); nothing is ever submitted upstream. A service that a skill
+needs to talk to (a mail server, a second host) is created on that network for
+the test and deleted as soon as it is no longer needed.
+
 Each procedure is carried out on a fresh FreeBSD system of each release in the
 matrix:
 
@@ -38,6 +46,15 @@ The model gets exactly one tool, which runs a shell command on the test system
 running the test. The harness separates "the command could not reach the test
 system" from "the command ran and failed", so an infrastructure problem is
 never recorded as a failure of the skill.
+
+Each skill directory holds, next to `SKILL.md`, the files the test uses:
+
+| File | Purpose |
+|---|---|
+| `verify.sh` | Run on the test system after the model finishes. Exit 0 means the task's end state exists. It is also run before the model starts, and must fail on a fresh system; when the end state already existed, the harness reports `VERIFIED-NO-OP` (exit status 3), and the skill's table says `verified (no-op)`, not `verified`. |
+| `setup.sh` | Optional. Puts the fresh system into the state the skill assumes (for example, pkg installed, or no network). The model never does this part. |
+| `test-inputs.txt` | Optional. The values of the skill's inputs, given to the model the way a person asking for the task would give them. |
+| `answer.sh` | Required for skills that report something rather than change something (a search, a query). Such a skill always ends by writing a `RESULT:` line; `answer.sh` computes the true `RESULT:` line on the test system without the model, and the model's final message must contain exactly that line. The test inputs must differ from the skill's own examples, so the answer cannot be copied from the text. |
 
 After the model finishes, the skill's own Verify step is run independently.
 The model's opinion of its success is not taken as the result. If the model
