@@ -1,7 +1,8 @@
 #!/bin/sh
-# Preconditions for ports/port-install: pkg installed; the ports tree in
-# /usr/ports on the branch matching pkg (as ports/ports-tree-git does it);
-# sysutils/tree (the test port, not the skill's example) not installed.
+# Preconditions for ports/port-deinstall: pkg and git installed; the ports
+# tree on the branch matching pkg; sysutils/tree (the test port) built and
+# installed from it; the package list saved so verify.sh can see that nothing
+# else was removed.
 pkg -N >/dev/null 2>&1 || env ASSUME_ALWAYS_YES=yes pkg bootstrap >/dev/null || exit 1
 env IGNORE_OSVERSION=yes pkg install -y git >/dev/null || exit 1
 case "$(pkg -vv | grep -m1 url)" in
@@ -11,4 +12,7 @@ case "$(pkg -vv | grep -m1 url)" in
        b="-b $b" ;;
 esac
 git clone --quiet --depth 1 $b https://git.FreeBSD.org/ports.git /usr/ports </dev/null || exit 1
-! pkg info -e tree
+make -C /usr/ports/sysutils/tree BATCH=yes ALLOW_UNSUPPORTED_SYSTEM=yes install clean </dev/null >/root/setup-build.log 2>&1 || exit 1
+pkg info -e tree || exit 1
+list=$(pkg query '%n') || exit 1
+printf '%s\n' "$list" | LC_ALL=C sort > /var/db/hbskills-deinstall-before || exit 1
