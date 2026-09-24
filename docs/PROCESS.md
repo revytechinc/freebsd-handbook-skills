@@ -55,7 +55,8 @@ Each skill directory holds, next to `SKILL.md`, the files the test uses:
 
 | File | Purpose |
 |---|---|
-| `verify.sh` | Run on the test system after the model finishes. Exit 0 means the task's end state exists. It is also run before the model starts, and must fail on a fresh system; when the end state already existed, the harness reports `VERIFIED-NO-OP` (exit status 3), and the skill's table says `verified (no-op)`, not `verified`. |
+| `report-only` | Optional, empty. Marks a skill that only reports something and changes nothing. It has `answer.sh` instead of `verify.sh`: the true answer is computed before the model runs, must be unchanged afterwards (so the model did not alter what it reports on), and must be in the model's final message. |
+| `verify.sh` | (Not used by a `report-only` skill.) Run on the test system after the model finishes. Exit 0 means the task's end state exists. It is also run before the model starts, and must fail on a fresh system; when the end state already existed, the harness reports `VERIFIED-NO-OP` (exit status 3), and the skill's table says `verified (no-op)`, not `verified`. |
 | `setup.sh` | Optional. Puts the fresh system into the state the skill assumes (for example, pkg installed, or no network). The model never does this part. |
 | `test-inputs.txt` | Optional. The values of the skill's inputs, given to the model the way a person asking for the task would give them. |
 | `reboots` | Optional, empty. The skill may end by scheduling a restart (`shutdown -r +1`); the harness then waits for the machine to come back before running `verify.sh`. |

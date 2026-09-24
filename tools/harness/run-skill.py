@@ -32,6 +32,11 @@ If the skill directory has test-inputs.txt, its lines (such as
 "PACKAGE=nginx-lite") are given to the model as the skill's inputs, the way a
 person asking for the task would give them.
 
+A skill that only reports something is marked with a "report-only" file and
+has answer.sh instead of verify.sh. Its true answer is computed BEFORE the
+model runs; after the run it must be unchanged (the model must not have
+altered what it reports on) and must be an exact line of the final message.
+
 A run is VERIFIED only when ALL hold: the model finished normally and said
 DONE (not FAILED, not NOT DONE), the skill's verify.sh passes afterwards, and,
 if the skill has answer.sh, the model's final message contains its answer.
@@ -274,6 +279,12 @@ def verdict(result):
     return "VERIFIED", 0
 
 
+def verify_word(result):
+    if result.get("report_only"):
+        return "report-only (no end state)"
+    return "verify " + ("passed" if result["verify_exit"] == 0 else "FAILED")
+
+
 def report(result, run_dir):
     """Write result.json, print the verdict, and return the exit status."""
     with open(os.path.join(run_dir, "result.json"), "w") as f:
@@ -288,7 +299,7 @@ def report(result, run_dir):
     if result["expected_answer"]:
         answer = "; answer " + (f"MISSING {result['answer_missing']}" if result["answer_missing"] else "matched")
     print(f"{label}  {where}; model said {'DONE' if result['model_said_done'] else 'not DONE'}; "
-          f"verify {'passed' if result['verify_exit'] == 0 else 'FAILED'}{answer}; run: {run_dir}")
+          f"{verify_word(result)}{answer}; run: {run_dir}")
     return code
 
 
@@ -410,56 +421,116 @@ def check_answer(target, name, answer, skill_text, said, verify_exit):
                        f"(exit {a.returncode}): {(a.stdout + a.stderr).strip()[-200:]}; fix answer.sh")
 
 
-def main():
-    skill_dir, name, do_reset = parse_args(sys.argv[1:])
-    skill_md, verify = os.path.join(skill_dir, "SKILL.md"), os.path.join(skill_dir, "verify.sh")
-    for p in (skill_md, verify):
-        if not os.path.isfile(p):
-            die(f"missing {p}")
-    answer = os.path.join(skill_dir, "answer.sh")
+def load_skill(skill_dir):
+    """The skill's files: dict with text, verify path (None for a report-only
+    skill), answer path, inputs, report_only and whether it may restart.
+    A skill is report-only only when it says so with a "report-only" file."""
+    skill_md = os.path.join(skill_dir, "SKILL.md")
+    verify, answer = os.path.join(skill_dir, "verify.sh"), os.path.join(skill_dir, "answer.sh")
+    report_only = os.path.isfile(os.path.join(skill_dir, "report-only"))
+    if not os.path.isfile(skill_md):
+        die(f"missing {skill_md}; add SKILL.md to the skill directory")
     with open(skill_md) as f:
-        skill_text = f.read()
-    if "RESULT:" in skill_text and not os.path.isfile(answer):
+        text = f.read()
+    if "RESULT:" in text and not os.path.isfile(answer):
         die("the skill reports a RESULT: line but has no answer.sh to check it against; add answer.sh")
-    target = load_target(name)
-    prepare(target, name, skill_dir, do_reset)
-
-    before = run_verify(target, verify)
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    run_dir = os.path.join(WORK, "runs", f"{stamp}-{os.path.basename(skill_dir)}-{name}")
-    os.makedirs(run_dir)
-    log_path, transcript = os.path.join(run_dir, "commands.jsonl"), os.path.join(run_dir, "transcript.jsonl")
-
+    if report_only:
+        if not os.path.isfile(answer):
+            die(f"{skill_dir} is marked report-only but has no answer.sh; add answer.sh")
+        if os.path.isfile(verify) or os.path.isfile(os.path.join(skill_dir, "reboots")):
+            die(f"{skill_dir} is marked report-only but also has verify.sh or reboots; "
+                "a report-only skill changes nothing: remove one or the other")
+        verify = None
+    elif not os.path.isfile(verify):
+        die(f"missing {verify}; add verify.sh, or mark a skill that only reports with a 'report-only' file and answer.sh")
     inputs_file = os.path.join(skill_dir, "test-inputs.txt")
-    inputs = open(inputs_file).read().strip() if os.path.isfile(inputs_file) else ""
-    reboots = os.path.isfile(os.path.join(skill_dir, "reboots"))
-    booted_before = boot_stamp(target, name) if reboots else None
-    rc, err = run_model(skill_text, inputs, target, name, log_path, transcript)
+    inputs = ""
+    if os.path.isfile(inputs_file):
+        with open(inputs_file) as f:
+            inputs = f.read().strip()
+    return {"dir": skill_dir, "text": text, "verify": verify, "answer": answer, "inputs": inputs,
+            "report_only": report_only, "reboots": os.path.isfile(os.path.join(skill_dir, "reboots"))}
+
+
+def answer_now(target, name, answer, skill_text):
+    """Run answer.sh for a report-only skill; its answer lines. Dies if it
+    cannot compute one (the machine was prepared by setup.sh, so that is a
+    test-setup problem) or if the answer appears word for word in the skill."""
+    a = run_verify(target, answer)
+    lines = [l.strip() for l in a.stdout.splitlines() if l.strip()]
+    if a.returncode != 0 or not lines:
+        die(f"answer.sh could not compute the answer on {name} before the run (exit {a.returncode}): "
+            f"{(a.stdout + a.stderr).strip()[-200:]}; fix answer.sh or setup.sh")
+    copyable = [l for l in lines if l in skill_text]
+    if copyable:
+        die(f"the expected answer {copyable} appears word for word in the skill; use test inputs "
+            "that differ from the skill's examples")
+    return lines
+
+
+def run_report_only(skill, target, said, expected):
+    """For a report-only skill: the answer computed before the run must still
+    hold after it (the model must not have changed what it reports on), and
+    must be in the model's final message."""
+    a = run_verify(target, skill["answer"])
+    after = [l.strip() for l in a.stdout.splitlines() if l.strip()]
+    missing = answer_missing(expected, said)
+    if a.returncode != 0 or after != expected:
+        missing = missing + [f"(the machine changed during the run: answer.sh now exits {a.returncode} with {after})"]
+    return missing
+
+
+def run_once(skill, target, name, run_dir, stamp, expected_before):
+    """Run the model on the target and check the result; returns the result dict."""
+    log_path, transcript = os.path.join(run_dir, "commands.jsonl"), os.path.join(run_dir, "transcript.jsonl")
+    booted_before = boot_stamp(target, name) if skill["reboots"] else None
+    rc, err = run_model(skill["text"], skill["inputs"], target, name, log_path, transcript)
     err = ((err or "") + " " + model_error(transcript)).strip()
     said = final_text(transcript)
     model_ok = rc == 0 and said is not None
     done = model_ok and said_done(said)
-    unsettled = settle_reboot(target, name, reboots, booted_before, log_path)
+    unsettled = settle_reboot(target, name, skill["reboots"], booted_before, log_path)
+    if skill["report_only"]:
+        missing = run_report_only(skill, target, said, expected_before)
+        return {"model_exit": rc, "model_stderr": err, "model_finished": model_ok, "model_said_done": done,
+                "verify_exit": None, "verify_stdout": "(report-only skill: no end state to check)",
+                "verify_stderr": "", "expected_answer": expected_before, "answer_missing": missing,
+                "verified": done and not missing}
     if unsettled:
         after = subprocess.CompletedProcess([], 1, stdout=f"FAIL: {unsettled}", stderr="")
     else:
-        after = run_verify(target, verify)  # independent of the model
+        after = run_verify(target, skill["verify"])  # independent of the model
     try:
-        expected, missing = check_answer(target, name, answer, skill_text, said, after.returncode)
+        expected, missing = check_answer(target, name, skill["answer"], skill["text"], said, after.returncode)
     except HarnessError as e:
         with open(os.path.join(run_dir, "result.json"), "w") as f:
-            json.dump({"skill": os.path.relpath(skill_dir, ROOT), "target": name, "time_utc": stamp,
+            json.dump({"skill": os.path.relpath(skill["dir"], ROOT), "target": name, "time_utc": stamp,
                        "harness_error": str(e), "verified": False}, f, indent=2)
         die(f"{e}; run: {run_dir}")
-    result = {
-        "skill": os.path.relpath(skill_dir, ROOT), "target": name, "release": target.get("release"),
-        "model": MODEL, "time_utc": stamp, "model_exit": rc, "model_stderr": err,
-        "model_finished": model_ok, "model_said_done": done,
-        "already_satisfied_before": before.returncode == 0, "verify_before": before.stdout[-1000:],
-        "verify_exit": after.returncode, "verify_stdout": after.stdout[-4000:], "verify_stderr": after.stderr[-2000:],
-        "inputs": inputs, "expected_answer": expected, "answer_missing": missing,
-        "verified": done and after.returncode == 0 and not missing,
-    }
+    return {"model_exit": rc, "model_stderr": err, "model_finished": model_ok, "model_said_done": done,
+            "verify_exit": after.returncode, "verify_stdout": after.stdout[-4000:],
+            "verify_stderr": after.stderr[-2000:], "expected_answer": expected, "answer_missing": missing,
+            "verified": done and after.returncode == 0 and not missing}
+
+
+def main():
+    skill_dir, name, do_reset = parse_args(sys.argv[1:])
+    skill = load_skill(skill_dir)
+    target = load_target(name)
+    prepare(target, name, skill_dir, do_reset)
+    if skill["report_only"]:
+        # Nothing to check before, but the true answer is taken now, before the model.
+        before = subprocess.CompletedProcess([], 1, "", "")
+        expected_before = answer_now(target, name, skill["answer"], skill["text"])
+    else:
+        before, expected_before = run_verify(target, skill["verify"]), None
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    run_dir = os.path.join(WORK, "runs", f"{stamp}-{os.path.basename(skill_dir)}-{name}")
+    os.makedirs(run_dir)
+    result = {"skill": os.path.relpath(skill_dir, ROOT), "target": name, "release": target.get("release"),
+              "model": MODEL, "time_utc": stamp, "inputs": skill["inputs"], "report_only": skill["report_only"],
+              "already_satisfied_before": before.returncode == 0, "verify_before": before.stdout[-1000:]}
+    result.update(run_once(skill, target, name, run_dir, stamp, expected_before))
     sys.exit(report(result, run_dir))
 
 
