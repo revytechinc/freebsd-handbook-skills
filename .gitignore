@@ -1,0 +1,8 @@
+# Private working notes and local state (never publish)
+CLAUDE.local.md
+*.local.md
+.work/
+tools/harness/runs/
+__pycache__/
+*.pyc
+.publish-deny
