@@ -23,8 +23,12 @@ matrix:
 
 - **Jails** for most userland work: packages, services, users, configuration.
 - **Virtual machines** (bhyve) for anything that touches the kernel, the boot
-  loader, disks, filesystems, firewalls or system updates. VMs are reset to a
-  clean snapshot between skills.
+  loader, disks, filesystems, firewalls or system updates. There are two VMs
+  per release: one with a UFS root and one with a ZFS root, so skills that
+  depend on the root file system (for example, taking a boot environment
+  before an upgrade) are tested both ways. VMs are reset to a clean snapshot
+  between skills, and every test machine gets a checkpoint snapshot before
+  work on each Handbook section starts.
 - **Two or more VMs on a private network** for networking between machines.
 
 The skill is then written from what actually happened: the real commands, the
@@ -54,6 +58,7 @@ Each skill directory holds, next to `SKILL.md`, the files the test uses:
 | `verify.sh` | Run on the test system after the model finishes. Exit 0 means the task's end state exists. It is also run before the model starts, and must fail on a fresh system; when the end state already existed, the harness reports `VERIFIED-NO-OP` (exit status 3), and the skill's table says `verified (no-op)`, not `verified`. |
 | `setup.sh` | Optional. Puts the fresh system into the state the skill assumes (for example, pkg installed, or no network). The model never does this part. |
 | `test-inputs.txt` | Optional. The values of the skill's inputs, given to the model the way a person asking for the task would give them. |
+| `reboots` | Optional, empty. The skill may end by scheduling a restart (`shutdown -r +1`); the harness then waits for the machine to come back before running `verify.sh`. |
 | `answer.sh` | Required for skills that report something rather than change something (a search, a query). Such a skill always ends by writing a `RESULT:` line; `answer.sh` computes the true `RESULT:` line on the test system without the model, and the model's final message must contain exactly that line. The test inputs must differ from the skill's own examples, so the answer cannot be copied from the text. |
 
 After the model finishes, the skill's own Verify step is run independently.

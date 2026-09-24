@@ -24,6 +24,10 @@ Targets are described in the private file .work/targets.json:
                "ssh": "ssh -F /path/.work/ssh_config 192.0.2.71",
                "reset": ["ssh", "adminhost", "doas", "..."]}}
 
+If the skill directory has a file named "reboots", the skill may end by
+scheduling a reboot (shutdown -r +1). The harness then waits for the machine to
+go down and come back with its marker before running verify.sh.
+
 If the skill directory has test-inputs.txt, its lines (such as
 "PACKAGE=nginx-lite") are given to the model as the skill's inputs, the way a
 person asking for the task would give them.
@@ -68,8 +72,9 @@ You are given a skill: step-by-step instructions for one task. Follow it exactly
 - If the skill says to stop and report, stop and report.
 - If a tool result says TRANSPORT ERROR or TRANSPORT LOST, stop and report it:
   that is a problem with the test setup, not with the skill.
-When you finish, say DONE if every step and the skill's Verify step matched,
-otherwise say FAILED and name the step where it went wrong."""
+When you finish, the LAST line of your final message must be exactly one word
+on its own: DONE if every step and the skill's Verify step matched, otherwise
+FAILED (and, above that line, name the step where it went wrong)."""
 
 
 class HarnessError(Exception):
@@ -154,6 +159,22 @@ def run_model(skill_text, inputs, target, name, log_path, transcript_path):
                 return None, f"model did not finish within {MODEL_TIMEOUT}s"
 
 
+def model_error(transcript_path):
+    """The API error the model run ended with (rate or usage limit, ...), or ""."""
+    msg = ""
+    if not os.path.isfile(transcript_path):
+        return msg
+    with open(transcript_path) as f:
+        for line in f:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("type") == "result" and ev.get("is_error"):
+                msg = f"{ev.get('api_error_status') or ''} {ev.get('result') or ''}".strip()
+    return msg
+
+
 def final_text(transcript_path):
     """The model's final message, or None if the transcript has no result."""
     last = None
@@ -168,11 +189,14 @@ def final_text(transcript_path):
     return last
 
 
-# The verdict: a line that STARTS with DONE, allowing markdown decoration
-# ("**DONE**", "## DONE") and a summary after it ("**DONE** - all steps
-# matched"). Case-sensitive: quoted command output is full of a lowercase
+# The verdict: some line STARTS with DONE (the prompt asks for it as the last
+# line; any line is accepted, but FAILED / NOT DONE anywhere vetoes it),
+# allowing only known decoration
+# before it (markdown "**DONE**", "## DONE", "- DONE", or a check mark
+# "✅ **DONE**"; not "❌ DONE") and a summary
+# after it ("**DONE** - all steps matched"). Case-sensitive: quoted command output is full of a lowercase
 # "done" ("Extracting curl: ... done"), which is not a verdict.
-DONE_LINE = re.compile(r"^[\s*_`#>]*DONE(?![\w-])", re.M)
+DONE_LINE = re.compile("^[\\s*_`#>\u2705\u2714\u2713\ufe0f-]*DONE(?![\\w-])", re.M)
 
 
 def said_done(text):
@@ -285,6 +309,84 @@ def answer_missing(expected, said):
     return missing + [f"(also answered: {o})" for o in others]
 
 
+BOOT_TOKEN = "/var/run/hbskills-boot-token"   # emptied at every boot (rc.d/cleanvar)
+
+
+def boot_stamp(target, name):
+    """Leave a random token in /var/run before the model runs. /var/run is
+    emptied at boot, so a missing token proves a restart, independent of the
+    clock (kern.boottime moves when the clock is stepped). Dies on failure."""
+    token = os.urandom(8).hex()
+    try:
+        p = ssh_run(target, f"cat /etc/hbskills-target; echo {token} > {BOOT_TOKEN} && cat {BOOT_TOKEN}", timeout=30)
+    except subprocess.TimeoutExpired:
+        die(f"could not leave the boot token on {name} (timeout)")
+    lines = p.stdout.splitlines()
+    if p.returncode != 0 or len(lines) < 2 or lines[0].strip() != name or lines[1].strip() != token:
+        die(f"could not leave the boot token on {name} (exit {p.returncode}): {p.stderr.strip()[-200:]}")
+    return token
+
+
+PROBE = ("cat /etc/hbskills-target; cat " + BOOT_TOKEN + " 2>/dev/null || echo GONE; "
+         "if pgrep -x shutdown >/dev/null || [ -e /var/run/nologin ]; then echo PENDING; else echo IDLE; fi")
+
+
+def probe_settled(target, name, token, scheduled):
+    """One look at the target: "rebooted" (token gone, nothing pending),
+    "idle" (token still there, no restart scheduled or pending), or "wait"."""
+    try:
+        p = ssh_run(target, PROBE, timeout=30)
+    except subprocess.TimeoutExpired:
+        return "wait"
+    lines = [l.strip() for l in p.stdout.splitlines()]
+    if p.returncode != 0 or len(lines) < 3 or lines[0] != name or lines[2] != "IDLE":
+        return "wait"
+    if lines[1] != token:
+        return "rebooted"
+    return "wait" if scheduled else "idle"
+
+
+def restart_scheduled(log_path):
+    """True when the command log shows a shutdown -r that ran successfully."""
+    if not os.path.isfile(log_path):
+        return False
+    with open(log_path) as f:
+        for line in f:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if (ev.get("event") == "end" and ev.get("command", "").lstrip().startswith("shutdown -r")
+                    and "Shutdown at" in ev.get("stdout", "")):
+                return True
+    return False
+
+
+def settle_reboot(target, name, reboots, booted_before, log_path):
+    """For a skill that may restart the machine (shutdown -r +1): wait until it
+    has either booted again (the boot token is gone) or, if no restart was
+    scheduled, until nothing is pending. When a restart was scheduled, only a
+    vanished boot token counts: a machine that still has it may be in the
+    middle of shutting down. Returns "" when settled, otherwise
+    why not; a machine that never comes back is the skill's failure, recorded
+    as NOT VERIFIED, not a harness error."""
+    if not reboots:
+        return ""
+    scheduled = restart_scheduled(log_path)
+    if scheduled:
+        time.sleep(90)  # shutdown -r +1: let the minute pass first
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 900:
+        state = probe_settled(target, name, booted_before, scheduled)
+        if state == "rebooted":
+            time.sleep(20)  # let the new boot finish starting services
+            return ""
+        if state == "idle":
+            return ""  # no restart asked for and none pending: verify.sh decides
+        time.sleep(10)
+    return f"the machine did not finish its restart within 900s (restart scheduled: {scheduled})"
+
+
 def check_answer(target, name, answer, skill_text, said, verify_exit):
     """(expected, missing) answer lines; both empty when the skill has no
     answer.sh. answer.sh computes the true answer on the target without the
@@ -330,11 +432,18 @@ def main():
 
     inputs_file = os.path.join(skill_dir, "test-inputs.txt")
     inputs = open(inputs_file).read().strip() if os.path.isfile(inputs_file) else ""
+    reboots = os.path.isfile(os.path.join(skill_dir, "reboots"))
+    booted_before = boot_stamp(target, name) if reboots else None
     rc, err = run_model(skill_text, inputs, target, name, log_path, transcript)
+    err = ((err or "") + " " + model_error(transcript)).strip()
     said = final_text(transcript)
     model_ok = rc == 0 and said is not None
     done = model_ok and said_done(said)
-    after = run_verify(target, verify)  # independent of the model
+    unsettled = settle_reboot(target, name, reboots, booted_before, log_path)
+    if unsettled:
+        after = subprocess.CompletedProcess([], 1, stdout=f"FAIL: {unsettled}", stderr="")
+    else:
+        after = run_verify(target, verify)  # independent of the model
     try:
         expected, missing = check_answer(target, name, answer, skill_text, said, after.returncode)
     except HarnessError as e:
