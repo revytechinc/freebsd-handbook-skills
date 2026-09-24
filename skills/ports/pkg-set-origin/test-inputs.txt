@@ -1,0 +1,2 @@
+OLD=devel/pcre2-old
+NEW=devel/pcre2
