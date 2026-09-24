@@ -27,9 +27,19 @@ verify.sh is also run once BEFORE the model: if it already passes, the result
 is recorded as "already satisfied", so a skill whose end state existed from the
 start is never mistaken for one the model achieved.
 
-Exit status: 0 verified, 1 not verified (the model did not say DONE, or
-verify.sh failed), 2 the run itself could not be carried out (infrastructure:
-reset, setup, the model process crashing or timing out).
+Exit status:
+  0  verified: the model said DONE and verify.sh passed, and the end state did
+     NOT exist before the run (the model brought it about);
+  3  verified, but the end state existed both before and after the run. The
+     harness cannot tell whether the model changed nothing or undid and redid
+     the work; confirm from the command log that the skill was a no-op;
+  1  not verified (the model did not say DONE, or verify.sh failed);
+  2  the run itself could not be carried out (infrastructure: reset, setup,
+     ssh, the model process crashing, any timeout, or verify.sh exiting with
+     anything other than 0 or 1).
+
+verify.sh must exit 0 (verified) or 1 (not verified). Any other status,
+including ssh's own 255, is treated as a failure of the run, not a verdict.
 """
 import json, os, re, shlex, subprocess, sys, tempfile, time
 
@@ -93,7 +103,11 @@ def reset(target, name):
     cmd = target.get("reset")
     if not cmd:
         die(f"target {name} has no reset command; refusing to run on a dirty machine")
-    p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=900)
+    try:
+        p = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired:
+        die(f"reset of {name} timed out after 900s; check that the host running the "
+            "reset command is reachable and that the VM or jail stops cleanly")
     if p.returncode != 0:
         die(f"reset of {name} failed: {p.stderr.strip()[-300:]}")
     if not wait_for(target, name):
@@ -149,10 +163,23 @@ def said_done(text):
 
 
 def run_verify(target, verify):
-    """Run verify.sh on the target over stdin; return the CompletedProcess."""
-    with open(verify) as f:
-        return subprocess.run(shlex.split(target["ssh"]) + ["/bin/sh -s"], stdin=f,
-                              capture_output=True, text=True, timeout=900)
+    """Run verify.sh on the target over stdin; return the CompletedProcess.
+    Not reaching the target (ssh exit 255, timeout) is an infrastructure
+    failure, never a verdict about the skill."""
+    try:
+        with open(verify) as f:
+            p = subprocess.run(shlex.split(target["ssh"]) + ["/bin/sh -s"], stdin=f,
+                               capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired:
+        die("verify.sh timed out on the target; check that the target is up "
+            "(ssh -F .work/ssh_config <address> true) and that verify.sh cannot hang")
+    if p.returncode == 255:
+        die(f"could not reach the target to run verify.sh ({p.stderr.strip()[-200:]}); "
+            "check the gateway, the target VM or jail state, and .work/ssh_config")
+    if p.returncode not in (0, 1):
+        die(f"verify.sh exited {p.returncode}; it must exit 0 or 1. Fix verify.sh "
+            f"(output: {(p.stdout + p.stderr).strip()[-200:]})")
+    return p
 
 
 def parse_args(argv):
@@ -176,11 +203,27 @@ def prepare(target, name, skill_dir, do_reset):
         die(f"{name} is not reachable with its marker")
     setup = os.path.join(skill_dir, "setup.sh")
     if os.path.isfile(setup):
-        with open(setup) as f:
-            p = subprocess.run(shlex.split(target["ssh"]) + ["/bin/sh -s"], stdin=f,
-                               capture_output=True, text=True, timeout=1800)
+        try:
+            with open(setup) as f:
+                p = subprocess.run(shlex.split(target["ssh"]) + ["/bin/sh -s"], stdin=f,
+                                   capture_output=True, text=True, timeout=1800)
+        except subprocess.TimeoutExpired:
+            die(f"setup.sh timed out on {name} after 1800s; check that the target can "
+            "reach its package mirror through the gateway, and that setup.sh never waits for input")
         if p.returncode != 0:
             die(f"setup.sh failed on {name}: {(p.stdout + p.stderr).strip()[-400:]}")
+
+
+def verdict(result):
+    """(label, exit status) for a run in which the model finished."""
+    before, after_ok = result["already_satisfied_before"], result["verify_exit"] == 0
+    if not result["verified"]:
+        broke = before and not after_ok
+        return ("NOT VERIFIED (verify.sh passed BEFORE the run and failed after it: "
+                "the run broke a working state)" if broke else "NOT VERIFIED"), 1
+    if before:
+        return "VERIFIED-NO-OP (end state already existed before the run)", 3
+    return "VERIFIED", 0
 
 
 def report(result, run_dir):
@@ -192,11 +235,10 @@ def report(result, run_dir):
         print(f"RUN FAILED  {where}: the model did not finish (exit {result['model_exit']}): "
               f"{result['model_stderr'].strip()[-200:]}; run: {run_dir}")
         return 2
-    label = "VERIFIED" if result["verified"] else "NOT VERIFIED"
-    note = " (end state already existed before the run)" if result["already_satisfied_before"] else ""
-    print(f"{label}{note}  {where}; model said {'DONE' if result['model_said_done'] else 'not DONE'}; "
+    label, code = verdict(result)
+    print(f"{label}  {where}; model said {'DONE' if result['model_said_done'] else 'not DONE'}; "
           f"verify {'passed' if result['verify_exit'] == 0 else 'FAILED'}; run: {run_dir}")
-    return 0 if result["verified"] else 1
+    return code
 
 
 def main():

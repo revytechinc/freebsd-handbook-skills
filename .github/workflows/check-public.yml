@@ -29,8 +29,10 @@ jobs:
       - name: check, without the deny list (pull request from a fork)
         if: env.PUBLISH_DENY == '' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
         run: |
-          python3 tools/check-public.py --all --no-deny-list
-          echo "::error::Fork pull request: only the partial check (without the private deny list) could run. A maintainer must check this change with the full list before merging."
+          rc=0; python3 tools/check-public.py --all --no-deny-list || rc=$?
+          if [ "$rc" -eq 1 ]; then echo "::error::The partial check FOUND problems (see above). Replace each flagged item with a documentation address or example.org, then push again."; exit 1; fi
+          if [ "$rc" -ne 0 ]; then echo "::error::The checker itself failed (exit $rc), so nothing was checked. If your change touches tools/, check that first; otherwise report the output above to the maintainers in the pull request."; exit 1; fi
+          echo "::error::The partial check found nothing, but it ran WITHOUT the private deny list (fork pull request). A maintainer must run the full check before merging."
           exit 1
       - name: refuse to run without the deny list
         if: env.PUBLISH_DENY == '' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)

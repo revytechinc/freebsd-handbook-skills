@@ -29,7 +29,9 @@ ALLOWED_NETS = [ipaddress.ip_network(n) for n in (
     "2001:db8::/32", "3fff::/20",                                  # documentation, RFC 3849 / 9637
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",  # NOSONAR python:S1313 -- private ranges (allow-list)
     "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",  # NOSONAR python:S1313 -- special-purpose (allow-list)
-    "0.0.0.0/32", "255.255.255.255/32", "224.0.0.0/4",  # NOSONAR python:S1313 -- special-purpose (allow-list)
+    "0.0.0.0/8", "255.255.255.255/32", "224.0.0.0/4",  # NOSONAR python:S1313 -- special-purpose (allow-list)
+    # 0.0.0.0/8 ("this network", RFC 1122) is never routed. It must stay /8:
+    # IPv4-compatible IPv6 such as C++ "::abs" (read as ::ab) maps into it.
     "::1/128", "::/128", "fe80::/10", "fc00::/7", "ff00::/8")]
 ALLOWED_MAIL_DOMAINS = ("example.org", "example.com", "example.net")
 # The FreeBSD project's public role addresses (never individual people's).
@@ -38,16 +40,24 @@ ALLOWED_MAIL_ADDRESSES = ("freebsd-questions@freebsd.org", "security-officer@fre
                           "bugmeister@freebsd.org", "webmaster@freebsd.org")
 DOC_MAC_PREFIXES = ("00:00:5e:00:53:", "00-00-5e-00-53-")          # RFC 7042
 
-# The lookahead lets a sentence end right after an address ("... 8.8.8.8.")
+# The lookahead lets a sentence end right after an address ("... 192.0.2.1.")
 # while still refusing to match inside a longer dotted number.
 IPV4 = re.compile(r"(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?:/\d{1,2})?(?!\w|\.\d)")
 MAX_ADDR = 45  # longest textual IPv6 address
 # Anything that could be IPv6: a run of hex digits and colons with at least two
 # colons. ipaddress decides whether it really is one.
 # (dots included, for an embedded IPv4 tail such as ::ffff:192.0.2.1)
-# Not followed by a word character: "::error::" (a CI annotation) holds
-# "::e", which is a syntactically valid address but plainly not one.
-IPV6_CANDIDATE = re.compile(r"(?<![\w.])([0-9A-Fa-f:.]{2,})(?:/\d{1,3})?(?!\w)")
+IPV6_CANDIDATE = re.compile(r"(?<![\w.])([0-9A-Fa-f:.]{2,})(?:/\d{1,3})?")
+# GitHub Actions workflow commands ("::error::msg", "::warning file=x::msg")
+# start with "::e" and similar, which parse as IPv6 addresses. The line is NOT
+# rewritten (rewriting split real addresses such as "2a00::1" that sit in the
+# parameters); an IPv6 candidate is skipped only when it starts exactly at a
+# command token. The names are listed, not matched as any word, because a
+# generic word would match hex groups. The lookbehind stops the "::" at the end
+# of a real address ("2001:db8::add") from being read as a command.
+ANNOTATION = re.compile(
+    r"(?<![0-9A-Fa-f:])::(?:error|warning|notice|debug|group|endgroup|add-mask|stop-commands|echo"
+    r"|add-matcher|remove-matcher|set-output|save-state|add-path|set-env)(?=[\s:])")
 MAC = re.compile(r"(?<![\w:-])((?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})(?![\w:-])")
 MAIL = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)")
 
@@ -98,17 +108,51 @@ def is_allowed_ip(text):
         return True
     if ip.version == 4 and text.startswith("255."):
         return True  # a netmask, not a host
+    if any(ip in n for n in ALLOWED_NETS):
+        return True
     if ip.version == 6 and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped  # ::ffff:a.b.c.d is judged by its IPv4 address
+    elif ip.version == 6 and ip in ipaddress.ip_network("::/96"):
+        # Deprecated IPv4-compatible form (RFC 4291 2.5.5.1), never routed, and
+        # also what C++ "::abs" parses as. Judge it by its IPv4 part, so
+        # "::192.0.2.1" is still caught.
+        ip = ipaddress.ip_address(int(ip))
     return any(ip in n for n in ALLOWED_NETS)
 
 
+def trim_to_address(cand):
+    """The candidate pattern also takes in what follows an address: a full stop
+    ("... 2001:db8::1."), a colon ("2001:db8::1: note"), or the "::" closing a
+    CI annotation and the hex letters after it ("2001:db8::1::bad" reads as
+    "...::1::ba"). If the whole candidate does not parse, use the longest prefix
+    ending just before a ':' or '.' that does. If none does, the candidate is
+    returned unchanged and is then not treated as an address. Known gap: an
+    address whose last group runs straight into a hex letter ("...::8888a")
+    has no such prefix and is missed."""
+    for end in range(len(cand), 1, -1):
+        if end < len(cand) and cand[end] not in ".:":
+            continue
+        probe = cand[:end]
+        if probe.count(":") < 2:
+            break
+        try:
+            ipaddress.ip_address(probe)
+            return probe
+        except ValueError:
+            continue
+    return cand
+
+
 def ip_problems(line):
+    commands = {m.start() for m in ANNOTATION.finditer(line)}
     found = [f"public IPv4 address {m.group(0)}" for m in IPV4.finditer(line)
              if not is_allowed_ip(m.group(1))]
     for m in IPV6_CANDIDATE.finditer(line):
-        cand = m.group(1).rstrip(".")  # a sentence may end right after an address
+        if m.start() in commands:
+            continue  # "::error" and the like, not an address
+        cand = m.group(1)
         cand = cand.lstrip(":") if cand.startswith(":") and not cand.startswith("::") else cand
+        cand = trim_to_address(cand)
         if cand.count(":") >= 2 and not MAC.fullmatch(cand) and not is_allowed_ip(cand):
             found.append(f"public IPv6 address {m.group(0)}")
     return found
@@ -190,4 +234,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Exit 1 means "found problems" and nothing else: a crash must not look
+    # like findings (CI prints different advice for each), so it exits 2.
+    try:
+        main()
+    except Exception:  # noqa: BLE001 -- any crash; SystemExit passes through
+        import traceback
+        traceback.print_exc()
+        sys.exit(2)

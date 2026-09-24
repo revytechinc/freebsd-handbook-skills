@@ -101,6 +101,18 @@ def test_checker():
         "personal e-mail": f"mail {mail}",
         "personal freebsd.org e-mail": "mail " + "@".join(["a-committer", "freebsd.org"]),
         "ssh to a public address": f"ssh root@{pub4}",
+        "public IPv6 followed by letters": f"addr {pub6}x",
+        "public IPv4 hidden in a CI annotation parameter": f"::error file={pub4}::bad",
+        "public IPv4 inside a CI annotation message": f"::notice {pub4}::x",
+        "public IPv4 in IPv4-compatible IPv6 form": f"route ::{pub4} here",
+        "short public IPv6 as a CI annotation parameter": f"::warning {pub6.split(':')[0]}::1",
+        "public IPv6 with a hex tail in a CI annotation": f"::error file={pub6.split(':')[0]}" + "::" + "dead" + ":beef",
+        "public IPv6 in a CI annotation parameter": f"::error file={pub6}::bad",
+        "public IPv6 at the end of a sentence": f"the address is {pub6}.",
+        "public IPv6 before a colon": f"{pub6}: note",
+        "public IPv6 ending in a CI command name": f"{pub6[:-3]}::add-path::x",
+        "two public IPv6 addresses on one line": f"{pub6[:-3]}::beef and {pub6[:-3]}::cafe",
+        "public IPv6 followed by underscore": f"addr {pub6}_old",
     }
     must_pass = {
         "documentation IPv4": "192.0.2.10 198.51.100.1/24 203.0.113.5",
@@ -113,6 +125,8 @@ def test_checker():
         "ssh to a documentation address": "ssh root@192.0.2.10",
         "IPv4-mapped localhost": "::ffff:127.0.0.1",
         "CI annotation syntax": 'echo "::error::Fork pull request" and "::warning::x"',
+        "C++ scope operator": "return ::abs(x) + std::max(a, b);",
+        "other CI commands": 'echo "::echo::on" "::add-matcher::m.json" "::remove-matcher owner=x::"',
     }
     for name, text in must_fail.items():
         rc, out = run_checker(text)

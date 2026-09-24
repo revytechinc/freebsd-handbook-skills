@@ -102,19 +102,24 @@ did not succeed. Stop and report the output.
 
 ## Undo
 
-On a system where step 3 installed pkg, this removes it again:
+Only if step 3 installed pkg. Do NOT undo if pkg was already installed before
+you started (step 2 said `exit=0`): other software may depend on it.
 
-    pkg delete -y pkg
+pkg refuses to remove itself without the force flag `-f`, so run:
 
-Do not run this if pkg was already installed before you started (step 2 said
-`exit=0`): other software on the system may depend on it.
+    pkg delete -fy pkg; echo "exit=$?"; pkg -N; echo "installed-exit=$?"
+
+Expected: `exit=0`, then `pkg: pkg is not installed`, then `installed-exit=1`.
+Do not leave out `-f`: without it pkg prints
+`pkg: Cannot delete pkg itself without force flag`, exits with status 3, and
+removes nothing.
 
 ## Release results
 
-| Release | Result | Tested | Notes |
+| Release | Result | Tested (UTC) | Notes |
 |---|---|---|---|
-| 16.0-CURRENT | verified | 2026-09-24, snapshot 20260921 (a6deeaa2fb3b) | pkg preinstalled in the VM image: step 3 skipped. Repository branch `latest`. |
-| 15.1-RELEASE | verified | 2026-09-24 | pkg preinstalled in the VM image: step 3 skipped. |
+| 16.0-CURRENT | verified (no-op) | 2026-09-24, snapshot 20260921 (a6deeaa2fb3b) | pkg preinstalled in the VM image: the skill correctly skipped step 3. Repository branch `latest`. |
+| 15.1-RELEASE | verified (no-op) | 2026-09-24 | pkg preinstalled in the VM image: the skill correctly skipped step 3. |
 | 15.0-RELEASE | verified | 2026-09-24 | Base system is installed as packages (487 of them), but pkg itself was missing: step 3 installed it. Repository name `FreeBSD-ports`. |
 | 14.5-RELEASE | verified | 2026-09-24 | |
 | 14.4-RELEASE | verified | 2026-09-24 | |
@@ -123,22 +128,31 @@ Do not run this if pkg was already installed before you started (step 2 said
 | 14.1-RELEASE (EoL) | verified | 2026-09-24 | |
 | 14.0-RELEASE (EoL) | verified | 2026-09-24 | Downloads over plain `http://` (`pkg+http://pkg.FreeBSD.org/...`); later releases use `https://`. |
 
+Undo was run by hand on 14.0 to 15.0 (2026-09-24 UTC), with and without `-f`:
+the output matched the Undo section exactly on every one.
+
 ## Weak-model check
 
 2026-09-24 (UTC): claude-haiku-4-5, given only this skill and a tool that runs
 one command on the test machine, followed it on a freshly reset system of
 every release in the table above. A run counts only when the model finished and
 said DONE AND the independent check (`verify.sh`) passed afterwards: all 9 did.
-The model ran only the skill's own commands, in order, and took the step-2
-decision correctly each time. On 14.0 to 15.0 it installed pkg. On 15.1 and
+A manual review of each run's command log showed the model ran only the
+skill's own commands, in order, and took the step-2 decision correctly each
+time. On 14.0 to 15.0 it installed pkg. On 15.1 and
 16.0-CURRENT pkg was already installed before the run, so the check shows the
 model correctly detected that and skipped step 3, not that it installed pkg.
 
 ## Not verified
 
-Nothing. The interactive question shown in the Handbook (`Do you want to fetch
-and install it now? [y/N]`) only appears when pkg is run from a terminal; this
-skill avoids it on purpose with `ASSUME_ALWAYS_YES=yes`.
+- Step 3's network-failure branch (`No address record`, `Network is
+  unreachable`, `timed out`): not provoked. The messages listed are what
+  `fetch(3)` reports for those failures, but they were not observed here.
+- Undo on 15.1 and 16.0-CURRENT: not run, on purpose. pkg came preinstalled
+  there, and this skill says not to remove it in that case.
+- The interactive question shown in the Handbook (`Do you want to fetch and
+  install it now? [y/N]`) only appears when pkg is run from a terminal. This
+  skill avoids it on purpose with `ASSUME_ALWAYS_YES=yes`.
 
 ## Source
 

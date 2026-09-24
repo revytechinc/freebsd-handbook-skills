@@ -114,7 +114,7 @@ If this does not match, the task did not succeed. Do not continue: go to
 
 ## Release results
 
-| Release | Result | Tested | Notes |
+| Release | Result | Tested (UTC) | Notes |
 |---|---|---|---|
 | 16.0-CURRENT | not verified | | |
 | 15.1-RELEASE | not verified | | |
@@ -131,6 +131,9 @@ so an unedited row can never claim a pass. For 16.0-CURRENT, the Tested column
 also records the snapshot's build date.
 
 Result is one of: `verified` (every step was run and the Verify step passed),
+`verified (no-op)` (the end state already existed on that release before the
+run; confirm from the command log that the skill detected this and made no
+changes),
 `differs` (it works, with the release-specific steps noted),
 `fails` (does not work on that release; the Notes say why),
 `not verified` (could not be run; the Notes say why).
