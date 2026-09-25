@@ -195,7 +195,8 @@ def final_text(transcript_path):
 
 
 # The verdict: some line STARTS with DONE (the prompt asks for it as the last
-# line; any line is accepted, but FAILED / NOT DONE anywhere vetoes it),
+# line; any line is accepted, but FAILED or NOT DONE, in any case, anywhere
+# vetoes it, except a zero tally such as "1 done, 0 failed"),
 # allowing only known decoration
 # before it (markdown "**DONE**", "## DONE", "- DONE", or a check mark
 # "✅ **DONE**"; not "❌ DONE") and a summary
@@ -210,7 +211,14 @@ def said_done(text):
     summary after the verdict, and a fixed-size tail missed DONE."""
     # Any "failed" / "not done", in any case, vetoes: this can only reject a
     # correct run (e.g. one quoting "Failed to fetch"), never accept a bad one.
-    if re.search(r"\bFAILED\b", text, re.I) or re.search(r"\bNOT\s+DONE\b", text, re.I):
+    # The one exception is a zero tally in a list of counts, as in
+    # portupgrade's summary "1 done, 0 skipped and 0 failed", which models
+    # quote and paraphrase ("1 done, 0 failed"), and its legend "!:failed":
+    # ", 0 failed", "and 0 failed" and "!:failed" are removed before the
+    # check. Anything else, including "1 failed", "exit=0 FAILED" or
+    # "Step 0 failed", still vetoes.
+    quoted = re.sub(r"(?:,|\band) 0 failed\b|!:failed\b", "", text, flags=re.I)
+    if re.search(r"\bFAILED\b", quoted, re.I) or re.search(r"\bNOT\s+DONE\b", text, re.I):
         return False
     return bool(DONE_LINE.search(text))
 
