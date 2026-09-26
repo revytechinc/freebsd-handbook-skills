@@ -1,0 +1,3 @@
+JAIL=testjail
+TREE=testtree
+PORTS=sysutils/tree devel/gmake
