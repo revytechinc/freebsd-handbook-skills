@@ -1,0 +1,2 @@
+FILE=/home/hbtest5/notes.txt
+MODE=600
