@@ -1,0 +1,3 @@
+USER=hbtest3
+FULLNAME=Changed Name
+SHELL=/bin/tcsh
