@@ -1,0 +1,1 @@
+FILE=/home/hbtest6/contract.txt
