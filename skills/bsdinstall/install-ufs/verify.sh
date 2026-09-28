@@ -17,6 +17,12 @@ gpart show vtbd0 | grep -q freebsd-swap || fail "no swap partition"
 [ "$(sysrc -n defaultrouter)" = 10.77.0.1 ] || fail "defaultrouter $(sysrc -n defaultrouter)"
 grep -q '^nameserver 10.77.0.1$' /etc/resolv.conf || fail "resolv.conf"
 [ "$(sysrc -n sshd_enable)" = YES ] || fail "sshd not enabled"
+[ "$(sysrc -n dumpdev)" = AUTO ] || fail "dumpdev is not AUTO"
+# What the time zone step wrote (date +%Z also says UTC when none was set).
+[ "$(cat /var/db/zoneinfo 2>/dev/null)" = UTC ] || fail "time zone not set to UTC"
+# The two default extra components (downloaded during the installation).
+[ -f /usr/lib/debug/boot/kernel/kernel.debug ] || fail "kernel-dbg not installed"
+[ -f /usr/lib32/libc.so.7 ] || fail "lib32 not installed"
 id -Gn hbadmin | tr ' ' '\n' | grep -qx wheel || fail "hbadmin missing or not in wheel"
 [ "$(pw usershow hbadmin | cut -d: -f8)" = "HB Admin" ] || fail "full name"
 h=$(pw usershow hbadmin | cut -d: -f2)

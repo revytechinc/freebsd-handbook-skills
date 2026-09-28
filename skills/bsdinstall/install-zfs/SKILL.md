@@ -53,7 +53,7 @@ addresses are each four numbers from 0 to 255 separated by dots; `USERNAME`
 is 1 to 16 characters, starting with a lower-case letter, then only
 lower-case letters, digits and `_`; `FULLNAME` has only letters, digits,
 spaces and `.` `-`; the passwords are 8 to 64 characters and contain no `~`,
-no `<`, no `>` and no spaces. If any does not, stop and report: type nothing.
+no `<`, no `>` and no spaces. If any does not, stop and report it, type nothing, and end with FAILED.
 
 ## Step 1: Wait for the installer
 
@@ -65,7 +65,7 @@ take a minute or two).
 |---|---|
 | `Console type [vt100]:` on the last line | go to step 2 |
 | the **Welcome** screen (the question was already answered) | go to step 2, and leave out its first `vt100<Enter>` |
-| a `login:` prompt, or nothing of the installer after 5 tries (each try waits up to 2 minutes) | stop, and report the screen: the machine did not start the installer |
+| a `login:` prompt, or nothing of the installer after 5 tries (each try waits up to 2 minutes) | stop, report the screen, and end with FAILED: the machine did not start the installer |
 
 ## Step 2: Tell the installer the screen size
 
@@ -297,9 +297,8 @@ name and the given password, and a password hash for root) passed.
   step 2 after an error), the network form is filled in from the running
   interface; the skill assumes empty fields as on a first start.
 - The mirror list offers only `http` and `ftp` sites.
-- The recovery rows (a hostname field showing part of the name, root
-  passwords that do not match) were written from the screens' behaviour and
-  were not tried.
+- Recovering from a hostname field that shows part of the name, and from
+  root passwords that do not match, has not been tested.
 
 ## Differences from the Handbook
 

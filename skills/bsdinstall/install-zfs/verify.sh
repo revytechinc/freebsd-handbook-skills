@@ -23,7 +23,8 @@ gpart show vtbd0 | grep -q freebsd-swap || fail "no swap partition"
 grep -q '^nameserver 10.77.0.1$' /etc/resolv.conf || fail "resolv.conf"
 [ "$(sysrc -n sshd_enable)" = YES ] || fail "sshd not enabled"
 [ "$(sysrc -n dumpdev)" = AUTO ] || fail "dumpdev is not AUTO"
-[ "$(date +%Z)" = UTC ] || fail "time zone $(date +%Z)"
+# What the time zone step wrote (date +%Z also says UTC when none was set).
+[ "$(cat /var/db/zoneinfo 2>/dev/null)" = UTC ] || fail "time zone not set to UTC"
 # The two default extra components (downloaded during the installation).
 [ -f /usr/lib/debug/boot/kernel/kernel.debug ] || fail "kernel-dbg not installed"
 [ -f /usr/lib32/libc.so.7 ] || fail "lib32 not installed"

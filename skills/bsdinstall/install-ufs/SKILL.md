@@ -19,9 +19,10 @@ into the installed system.
 This skill is done at the console, not in a shell. The tool for it types keys
 and shows the screen (80 columns by 25 lines). On the screen, the item or
 button that is currently selected is shown between `«` and `»`, such as
-`[«  OK  »]`. Keys are written like this: `<Enter>`, `<Tab>`, `<Space>`,
-`<Up>`, `<Down>`, `<Left>`, `<Right>`; other text is typed as it is. Sending
-no keys (an empty string) waits and shows the screen again.
+`[«  OK  »]`. Keys are written like this: `<Enter>`, `<Space>`, `<Up>`,
+`<Down>`, `<Left>`, `<Right>`, `<Backspace>`; other text is typed as it is.
+Sending no keys (an empty string) waits until the screen stops changing (up
+to 2 minutes) and shows it again.
 
 ## Before you start
 
@@ -52,7 +53,7 @@ addresses are each four numbers from 0 to 255 separated by dots; `USERNAME`
 is 1 to 16 characters, starting with a lower-case letter, then only
 lower-case letters, digits and `_`; `FULLNAME` has only letters, digits,
 spaces and `.` `-`; the passwords are 8 to 64 characters and contain no `~`,
-no `<`, no `>` and no spaces. If any does not, stop and report: type nothing.
+no `<`, no `>` and no spaces. If any does not, stop and report it, type nothing, and end with FAILED.
 
 ## Step 1: Wait for the installer
 
@@ -63,7 +64,7 @@ take a minute or two).
 | If you see | Do this |
 |---|---|
 | `Console type [vt100]:` on the last line | go to step 2 |
-| a `login:` prompt, or anything that is not the installer after 5 tries | stop, and report the screen: the machine did not start the installer |
+| a `login:` prompt, or anything that is not the installer after 5 tries (each try waits up to 2 minutes) | stop, report the screen, and end with FAILED: the machine did not start the installer |
 
 ## Step 2: Terminal type and Welcome
 
@@ -73,8 +74,17 @@ selected. Send `<Enter>`.
 
 ## Step 3: Hostname
 
-The screen shows **Set Hostname** with an empty field. Send
-`HOSTNAME<Enter>` (with the hostname filled in).
+The screen shows **Set Hostname** with an empty field. Send `HOSTNAME`
+(the hostname filled in, with no `<Enter>`). Read the screen:
+
+| The field shows | Do this |
+|---|---|
+| exactly the hostname | send `<Enter>` |
+| nothing | send no keys (an empty string) once and read the screen again; if the field is still empty, send `HOSTNAME` once more, and read the screen again |
+| anything else (part of the name, or the name twice) | send `<Backspace>` once for every character shown, then `HOSTNAME`, and read the screen again |
+
+After 3 tries without exactly the hostname, stop, report the screen, and
+end with FAILED.
 
 ## Step 4: Installation type
 
@@ -103,12 +113,14 @@ image and will be downloaded). Send `<Enter>`.
 4. **Static Network Interface Configuration**, a form with `IP Address`,
    `Subnet Mask` and `Default Router`. The cursor is in `IP Address`. Send
    `IPADDR<Down>NETMASK<Down>ROUTER` (values filled in), check the three
-   fields on the screen show them, then send `<Enter>`.
+   fields on the screen show exactly them, then send `<Enter>`. If a field
+   shows anything else, stop, report the screen, and end with FAILED.
 5. **Would you like to configure IPv6 for this interface?** Select
    `[  No  ]` with `<Right>`, then send `<Enter>`.
 6. **Resolver Configuration**, a form with `Search`, `IPv4 DNS #1` and
    `IPv4 DNS #2`. The cursor is in `Search`. Send `<Down>DNS` (value filled
-   in), check `IPv4 DNS #1` shows it, then send `<Enter>`.
+   in), check `IPv4 DNS #1` shows exactly it, then send `<Enter>`. If it shows
+   anything else, stop, report the screen, and end with FAILED.
 
 ## Step 7: Disk
 
@@ -133,13 +145,21 @@ image and will be downloaded). Send `<Enter>`.
 2. The installer downloads, checks and unpacks the files (**Fetching
    Distribution**, **Archive Extraction**, with progress bars). Send no keys
    (an empty string) again and again until the screen shows **Set root
-   password**. This takes a few minutes. If a screen says **Error** or
+   password**. This takes a few minutes; after 20 tries without it, stop,
+   report the screen, and end with FAILED. If a screen says **Error** or
    **failed**, stop, report the screen, and end with FAILED.
 
 ## Step 9: Root password
 
-**Set root password**, a form with `Password` and `Repeat password`. Send
+Wait until the screen shows **Set root password**, a form with `Password`
+and `Repeat password` (send no keys, as in step 8). Then send
 `ROOTPW<Down>ROOTPW<Enter>` (the password filled in, both times).
+
+| Next, if you see | Do this |
+|---|---|
+| **Time Zone Selector** | go to step 10 |
+| a message that the passwords do not match, or **Set root password** again | send `<Enter>` if there is a message with `OK`, then, at the form, send `ROOTPW<Down>ROOTPW<Enter>` again. After 3 tries, stop, report the screen, and end with FAILED |
+| anything else | stop, report the screen, and end with FAILED |
 
 ## Step 10: Time zone and clock
 
@@ -197,7 +217,8 @@ error, stop, report the screen, and end with FAILED.
    is selected. Send `<Enter>`.
 3. **Complete**: *Installation of FreeBSD complete!* `[  Reboot   ]` is
    selected. Send `<Enter>`.
-4. Send no keys (an empty string) again and again until a line
+4. Send no keys (an empty string) again and again (at most 10 times; if it
+   does not appear, stop, report the screen, and end with FAILED) until a line
    `FreeBSD/amd64 (HOSTNAME) (...)` and `login:` appear: the installed system
    has started. Do not log in.
 
@@ -229,7 +250,8 @@ that prompt appeared, AND the independent check (`verify.sh`, typed into the ins
 system's console after logging in as root with the given password: release
 15.1, the hostname in the running system and in `rc.conf`, a GPT disk with a
 UFS root mounted from it and swap, the fixed address, router and name server, `sshd`
-enabled, the account in `wheel` with its full name and the given password, and a
+and crash dumps enabled, the time zone UTC, the debug and 32-bit parts
+installed, the account in `wheel` with its full name and the given password, and a
 password hash for root) passed.
 
 ## Not verified
@@ -239,6 +261,8 @@ password hash for root) passed.
   the Handbook describes first.
 - In this VM the partition scheme list started on `MBR`; the skill always
   picks GPT, as the Handbook recommends.
+- Recovering from a hostname field that shows part of the name, and from
+  root passwords that do not match, has not been tested.
 - Other choices (Auto (ZFS), manual partitioning, DHCP, IPv6, wireless,
   other time zones, packages instead of distribution sets) are not part of
   this skill.
