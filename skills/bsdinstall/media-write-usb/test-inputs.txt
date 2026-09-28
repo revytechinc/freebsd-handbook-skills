@@ -1,0 +1,2 @@
+IMGPATH=/var/tmp/freebsd-media/FreeBSD-15.1-RELEASE-amd64-mini-memstick.img
+DEVNAME=md7
