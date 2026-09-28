@@ -1,0 +1,2 @@
+USER=hbtest9
+EDITORPATH=/usr/bin/ee
