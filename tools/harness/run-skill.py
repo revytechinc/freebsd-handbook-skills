@@ -223,6 +223,205 @@ def said_done(text):
     return bool(DONE_LINE.search(text))
 
 
+PYLIB = os.path.expanduser("~/.local/share/hbskills-pylib")
+
+
+def run_model_console(skill_text, inputs, target, log_path, transcript_path):
+    """As run_model, but the model's only tool types keys on the installer VM's
+    serial console (console_mcp.py) instead of running shell commands."""
+    env = {"CONSOLE_HOST": target["console_host"], "CONSOLE_VM": target["vm"],
+           "CONSOLE_LOG": log_path, "PYTHONPATH": PYLIB}
+    mcp = {"mcpServers": {"console": {
+        "type": "stdio", "command": sys.executable,
+        "args": [os.path.join(ROOT, "tools", "harness", "console_mcp.py")], "env": env}}}
+    with tempfile.TemporaryDirectory(prefix="hb-model-") as empty:
+        cfg = os.path.join(empty, "mcp.json")
+        with open(cfg, "w") as f:
+            json.dump(mcp, f)
+        prompt = ("Here is the skill to follow at the test machine's console. Follow it exactly.\n\n"
+                  "=== SKILL ===\n" + skill_text + "\n=== END OF SKILL ===")
+        if inputs:
+            prompt += "\n\nUse these values for the skill's inputs:\n" + inputs
+        argv = ["claude", "-p", "--model", MODEL, "--setting-sources", "", "--tools", "",
+                "--mcp-config", cfg, "--strict-mcp-config",
+                "--allowedTools", "mcp__console__console", "--permission-mode", "dontAsk",
+                "--max-budget-usd", BUDGET, "--output-format", "stream-json", "--verbose",
+                "--system-prompt", SYSTEM, prompt]
+        with open(transcript_path, "w") as out:
+            try:
+                p = subprocess.run(argv, cwd=empty, stdin=subprocess.DEVNULL, stdout=out,
+                                   stderr=subprocess.PIPE, text=True, timeout=MODEL_TIMEOUT)
+                return p.returncode, p.stderr[-2000:]
+            except subprocess.TimeoutExpired:
+                return None, f"model did not finish within {MODEL_TIMEOUT}s"
+
+
+def input_value(inputs, key):
+    for line in (inputs or "").splitlines():
+        if line.startswith(key + "="):
+            return line.split("=", 1)[1]
+    return None
+
+
+def console_audit(log_path, hostname, input_values=()):
+    """Did the model end on the installed system's login prompt, and type
+    nothing after it first reached one? Returns None if so, else the reason.
+    Checked BEFORE console_verify.py, which presses Enter to find a login
+    prompt: had the model stopped inside the installer (on the Reboot button,
+    say), those presses would finish the installation for it."""
+    try:
+        with open(log_path) as f:
+            events = [json.loads(line) for line in f if line.strip()]
+    except (OSError, ValueError) as e:
+        return f"the console log could not be read ({e})"
+    # Typing the banner's words would fake a login screen (at adduser's text
+    # prompts, or in the installer's shell). A first filter only, on all the
+    # typed text joined (the test-input values removed, so an input such as
+    # a host name with "login" in it does not trip it): shell quoting can
+    # still build the words. What stops a faked screen from passing is the
+    # verifier, which types only Enter until it finds a login prompt, and then
+    # needs a real root login and a UFS root on the target disk.
+    typed = "".join(ev.get("keys") or "" for ev in events if ev.get("event") == "keys")
+    for value in input_values:
+        typed = typed.replace(value, "")
+    if imitates_login(typed):
+        return "the model typed text that imitates the login prompt"
+    screens, typed_after = walk_console_log(events, hostname)
+    # The installer must have run in this session: a VM that booted an
+    # earlier installation from its disk shows a login prompt at once. Its
+    # first question, "Console type [vt100]:", is asked only by the
+    # installation image (the boot loader's menu also says "Welcome").
+    # And it must have finished installing: from the installer's Shell a
+    # reboot could otherwise reach an installation left on the disk. (The
+    # reset also rolls the disk back to empty.)
+    before = screens[:first_login_index(screens, hostname)]
+    if not any("Console type [vt100]:" in sc for sc in before):
+        return "the installer's first question never appeared before the login prompt"
+    if not any("Installation of FreeBSD complete!" in sc for sc in before):
+        return "the installer's completion screen never appeared before the login prompt"
+    if not screens or not at_login(screens[-1], hostname):
+        return f"the model's last screen was not the login prompt of the installed system ({hostname})"
+    if typed_after:
+        return "the model typed at the installed system after its login prompt appeared"
+    return None
+
+
+def walk_console_log(events, hostname):
+    """(the screens in order, whether anything was typed after a screen
+    showing the installed system's banner)."""
+    screens, typed_after, seen_login = [], False, False
+    for ev in events:
+        keys = ev.get("keys") or ""
+        if ev.get("event") == "keys":
+            # Typing after the login prompt appeared, seen in the "keys"
+            # event, which is written before the keys are sent.
+            typed_after = typed_after or (seen_login and bool(keys))
+        elif ev.get("event") == "screen":
+            screens.append(ev.get("screen", ""))
+            # Any screen showing the banner counts, even with a boot message
+            # printed after it.
+            seen_login = seen_login or shows_banner(screens[-1], hostname)
+    return screens, typed_after
+
+
+def first_login_index(screens, hostname):
+    for i, sc in enumerate(screens):
+        if shows_banner(sc, hostname):
+            return i
+    return len(screens)
+
+
+def imitates_login(keys):
+    k = re.sub(r"<[A-Za-z0-9]+>", "", keys).lower()
+    return "login" in k or "freebsd/" in k
+
+
+def banner_re(hostname):
+    return re.compile(r"FreeBSD/\S+ \(" + re.escape(hostname) + r"\) \(tty\w+\)")
+
+
+def shows_banner(screen, hostname):
+    b = banner_re(hostname)
+    return any(b.fullmatch(l.rstrip()) for l in screen.splitlines())
+
+
+def at_login(screen, hostname):
+    """The getty banner, at the start of a line, followed by a bare login:."""
+    lines = [l.rstrip() for l in screen.splitlines() if l.strip()]
+    return (len(lines) >= 2 and lines[-1] == "login:"
+            and bool(banner_re(hostname).fullmatch(lines[-2])))
+
+
+def console_verify(target, verify, pw, name, run_dir):
+    try:
+        return subprocess.run([sys.executable, os.path.join(ROOT, "tools", "harness", "console_verify.py"),
+                               target["console_host"], target["vm"], verify],
+                              env=dict(os.environ, PYTHONPATH=PYLIB, HBV_ROOTPW=pw),
+                              capture_output=True, text=True, timeout=2400)
+    except subprocess.TimeoutExpired:
+        # Longer than console_verify.py's own waits added up (10 min for the
+        # login prompt, 10 for verify.sh, the typing), so it only fires if
+        # console_verify.py itself hangs.
+        die(f"console verify did not finish on {name} within 2400s; run: {run_dir}")
+
+
+def console_prepare(skill, target, name, do_reset):
+    """Check the skill can run at a console, reset the VM; return ROOTPW.
+    The target's reset must wipe the VM's disk and boot it from the
+    installation image (hbinst151: zfs rollback to @empty, then vm install)."""
+    if skill["report_only"] or os.path.isfile(skill["answer"] or ""):
+        die("console targets support only skills with verify.sh")
+    if not do_reset:
+        die("console targets always start from a reset (the installer VM must boot the image)")
+    pw = input_value(skill["inputs"], "ROOTPW")
+    if not pw:
+        die("a console skill's test-inputs.txt must set ROOTPW (root password given to the installer)")
+    if not input_value(skill["inputs"], "HOSTNAME"):
+        die("a console skill's test-inputs.txt must set HOSTNAME (to recognise the installed system's login prompt)")
+    try:
+        p = subprocess.run(target["reset"], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired:
+        die(f"reset of {name} did not finish within 900s")
+    if p.returncode != 0:
+        die(f"reset of {name} failed: {(p.stdout + p.stderr).strip()[-300:]}")
+    return pw
+
+
+def main_console(skill, target, name, skill_dir, do_reset):
+    """A console skill (the installer): reset the installer VM (it boots the
+    installation image), let the model type at its console, then log in on the
+    installed system over the console and run verify.sh there."""
+    pw = console_prepare(skill, target, name, do_reset)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    run_dir = os.path.join(WORK, "runs", f"{stamp}-{os.path.basename(skill_dir)}-{name}")
+    os.makedirs(run_dir)
+    log_path, transcript = os.path.join(run_dir, "commands.jsonl"), os.path.join(run_dir, "transcript.jsonl")
+    rc, err = run_model_console(skill["text"], skill["inputs"], target, log_path, transcript)
+    err = ((err or "") + " " + model_error(transcript)).strip()
+    said = final_text(transcript)
+    model_ok = rc == 0 and said is not None
+    done = model_ok and said_done(said)
+    values = [line.split("=", 1)[1] for line in (skill["inputs"] or "").splitlines() if "=" in line]
+    off_path = console_audit(log_path, input_value(skill["inputs"], "HOSTNAME") or "", [v for v in values if v])
+    if off_path:
+        # Not verified, and the verifier is not run: it would press keys.
+        # Exit 4 marks "not run", apart from 1 ("ran and failed").
+        v = subprocess.CompletedProcess([], 4, "", f"not run: {off_path}")
+    else:
+        v = console_verify(target, skill["verify"], pw, name, run_dir)
+    # 3: root's password was refused on the installed system, a verdict.
+    if v.returncode not in (0, 1, 3, 4):
+        die(f"console verify could not run on {name}: {v.stderr.strip()[-300:]}; run: {run_dir}")
+    result = {"skill": os.path.relpath(skill_dir, ROOT), "target": name, "release": target.get("release"),
+              "model": MODEL, "time_utc": stamp, "inputs": "(see test-inputs.txt)", "report_only": False,
+              "already_satisfied_before": False, "verify_before": "(reset exited 0; the audit requires the installer's first question in the log)",
+              "model_exit": rc, "model_stderr": err, "model_finished": model_ok, "model_said_done": done,
+              "verify_exit": v.returncode, "verify_stdout": v.stdout[-4000:], "verify_stderr": v.stderr[-2000:],
+              "expected_answer": [], "answer_missing": [], "verified": done and v.returncode == 0,
+              "verify_skipped": off_path}
+    sys.exit(report(result, run_dir))
+
+
 def run_verify(target, verify):
     """Run verify.sh (or answer.sh) on the target over stdin; return the CompletedProcess.
     Not reaching the target (ssh exit 255, timeout) is an infrastructure
@@ -290,6 +489,8 @@ def verdict(result):
 def verify_word(result):
     if result.get("report_only"):
         return "report-only (no end state)"
+    if result.get("verify_skipped"):
+        return "verify not run (" + result["verify_skipped"] + ")"
     return "verify " + ("passed" if result["verify_exit"] == 0 else "FAILED")
 
 
@@ -525,6 +726,8 @@ def main():
     skill_dir, name, do_reset = parse_args(sys.argv[1:])
     skill = load_skill(skill_dir)
     target = load_target(name)
+    if target.get("kind") == "console":
+        main_console(skill, target, name, skill_dir, do_reset)
     prepare(target, name, skill_dir, do_reset)
     if skill["report_only"]:
         # Nothing to check before, but the true answer is taken now, before the model.
