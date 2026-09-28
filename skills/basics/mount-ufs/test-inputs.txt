@@ -1,0 +1,3 @@
+DEVICE=/dev/md9
+MOUNTPOINT=/mnt/hbdata
+ACCESS=rw
