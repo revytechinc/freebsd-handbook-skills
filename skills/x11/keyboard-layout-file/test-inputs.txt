@@ -1,0 +1,4 @@
+LAYOUTS=de,us
+VARIANTS=nodeadkeys,
+MODEL=pc105
+OPTIONS=grp:alt_shift_toggle
