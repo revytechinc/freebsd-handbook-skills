@@ -10,7 +10,8 @@ Covers:
   - check-public.py: that planted addresses, MACs, e-mail addresses are caught
     and that legitimate text is not.
 """
-import importlib.util, os, subprocess, sys, tempfile, time
+import contextlib, importlib.util, io, os, shutil, subprocess, sys, tempfile, time
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.dirname(HERE)
@@ -125,6 +126,182 @@ def test_said_done():
     expect("verdict: pre-existing end state", rs.verdict({**base, "already_satisfied_before": True})[1] == 3)
 
 
+def test_gateway():
+    spec = importlib.util.spec_from_file_location(
+        "run_skill_gw", os.path.join(TOOLS, "harness", "run-skill.py"))
+    rs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rs)  # module level defines only; main() is not run
+    fake = "sk-PLANTED-1"
+    tmp = tempfile.mkdtemp(prefix="gw-")
+    saved_path = os.environ.get("PATH")
+    try:
+        # 1. redact(): a key is replaced throughout, the header is fixed-cased,
+        #    and text with no secret is left untouched.
+        expect("redact: repeated key replaced",
+               rs.redact(f"abc {fake} def {fake} gh", [fake])
+               == f"abc [REDACTED] def [REDACTED] gh")
+        expect("redact: bearer header, any case -> fixed",
+               rs.redact("authorization: bearer xyz", [])
+               == "Authorization: Bearer [REDACTED]")
+        expect("redact: no secret unchanged",
+               rs.redact("just text, no key here", [fake]) == "just text, no key here")
+
+        # 2. dgx_gateway_env(): the key file is read and the six variables set;
+        #    any provider selector already in the environment is dropped.
+        key_file = os.path.join(tmp, "key")
+        with open(key_file, "w") as f:
+            f.write(fake + "\n")
+        with patch.object(rs, "DGX_KEY_FILE", key_file), \
+                patch.dict(os.environ, {
+                    "CLAUDE_CODE_USE_BEDROCK": "1",
+                    "CLAUDE_CODE_USE_VERTEX": "1",
+                    "CLAUDE_CODE_USE_FOUNDRY": "1"}, clear=False):
+            env = rs.dgx_gateway_env()
+            expect("dgx: token read from key file", env["ANTHROPIC_AUTH_TOKEN"] == fake)
+            expect("dgx: base url is the fixed DGX_URL", env["ANTHROPIC_BASE_URL"] == rs.DGX_URL)
+            expect("dgx: api key empty", env["ANTHROPIC_API_KEY"] == "")
+            expect("dgx: sonnet alias default", env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "default")
+            expect("dgx: haiku alias default", env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "default")
+            expect("dgx: small_fast alias default", env["ANTHROPIC_SMALL_FAST_MODEL"] == "default")
+            expect("dgx: bedrock selector dropped", "CLAUDE_CODE_USE_BEDROCK" not in env)
+            expect("dgx: vertex selector dropped", "CLAUDE_CODE_USE_VERTEX" not in env)
+            expect("dgx: foundry selector dropped", "CLAUDE_CODE_USE_FOUNDRY" not in env)
+
+        # 3. dgx_gateway_env() stops (die raises SystemExit) when the key is
+        #    empty or unreadable, and the message carries no key.
+        empty_file = os.path.join(tmp, "empty")
+        open(empty_file, "w").close()
+        with patch.object(rs, "DGX_KEY_FILE", empty_file):
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                try:
+                    rs.dgx_gateway_env()
+                    stopped_empty = False
+                except SystemExit as exc:
+                    stopped_empty = exc.code not in (0, None)
+            expect("dgx: empty key file stops", stopped_empty)
+            expect("dgx: empty key message no key", fake not in buf.getvalue())
+
+        missing_file = os.path.join(tmp, "missing")
+        with patch.object(rs, "DGX_KEY_FILE", missing_file):
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                try:
+                    rs.dgx_gateway_env()
+                    stopped_missing = False
+                except SystemExit as exc:
+                    stopped_missing = exc.code not in (0, None)
+            expect("dgx: missing key file stops", stopped_missing)
+            expect("dgx: missing key message no key", fake not in buf.getvalue())
+
+        # 4. model_argv_env() and recorded_model() for each HB_GATEWAY value.
+        with patch.object(rs, "HB_GATEWAY", ""):
+            model_arg, env = rs.model_argv_env()
+            expect("argv: empty gw returns (MODEL, None)", (model_arg, env) == (rs.MODEL, None))
+            expect("recorded: empty gw returns MODEL", rs.recorded_model() == rs.MODEL)
+        with patch.object(rs, "HB_GATEWAY", "dgx"):
+            with patch.object(rs, "DGX_KEY_FILE", key_file):
+                model_arg, env = rs.model_argv_env()
+                expect("argv: dgx returns (sonnet, dict)", model_arg == "sonnet" and isinstance(env, dict))
+                expect("argv: dgx env carries the token", env.get("ANTHROPIC_AUTH_TOKEN") == fake)
+                expect("recorded: dgx returns DGX_MODEL", rs.recorded_model() == rs.DGX_MODEL)
+        with patch.object(rs, "HB_GATEWAY", "bogus"):
+            try:
+                rs.model_argv_env()
+                stopped_bogus = False
+            except SystemExit as exc:
+                stopped_bogus = exc.code not in (0, None)
+            expect("argv: bogus gw stops", stopped_bogus)
+
+        # 5. run_claude() with a fake 'claude' on PATH. The script emits the
+        #    key on stdout and in an Authorization header, then exec's sleep so
+        #    it holds no pipe (the timeout path can then read EOF at once).
+        bin_dir = os.path.join(tmp, "bin")
+        sleep_bin = shutil.which("sleep") or "/bin/sleep"
+        os.makedirs(bin_dir)
+        script = os.path.join(bin_dir, "claude")
+        with open(script, "w") as f:
+            f.write("#!/bin/sh\n")
+            f.write("echo '{\"k\":\"%s\"}'\n" % fake)
+            f.write('echo "Authorization: Bearer %s" >&2\n' % fake)
+            # Absolute path: the test puts only bin_dir first on PATH. stdout and
+            # stderr stay open, as with the real claude: a child that closes them
+            # and then hangs leaves TimeoutExpired with no output to redact.
+            f.write('exec %s "${SLEEP_SECONDS:-0}" </dev/null\n' % sleep_bin)
+        os.chmod(script, 0o700)
+        transcript_path = os.path.join(tmp, "transcript.jsonl")
+
+        mode = {"v": "gateway"}
+
+        def fake_argv_env():
+            if mode["v"] == "gateway":
+                return ("sonnet", dict(os.environ, ANTHROPIC_AUTH_TOKEN=fake))
+            return ("x", None)
+
+        def read_transcript():
+            with open(transcript_path) as f:
+                return f.read()
+
+        def fresh_run(label):
+            # Each run must write its own transcript: a file left by the
+            # previous run would let a path that writes nothing pass.
+            if os.path.exists(transcript_path):
+                os.remove(transcript_path)
+            result = rs.run_claude("prompt", "cfg", "tool", tmp, transcript_path)
+            expect(f"claude: {label} transcript written", os.path.exists(transcript_path))
+            return result
+
+        with patch.object(rs, "model_argv_env", fake_argv_env), \
+                patch.object(rs, "MODEL_TIMEOUT", 2), \
+                patch.dict(os.environ, {"PATH": bin_dir +
+                                        (os.pathsep + saved_path if saved_path else "")}):
+            # gateway, sleep 0: redacted everywhere, no key survives.
+            mode["v"] = "gateway"
+            with patch.dict(os.environ, {"SLEEP_SECONDS": "0"}):
+                rc, text = fresh_run("gw sleep0")
+                t = read_transcript()
+                expect("claude: gw sleep0 rc 0", rc == 0)
+                expect("claude: gw sleep0 transcript no key", fake not in t)
+                expect("claude: gw sleep0 transcript has [REDACTED]", "[REDACTED]" in t)
+                expect("claude: gw sleep0 text no key", fake not in text)
+                expect("claude: gw sleep0 text has [REDACTED]", "[REDACTED]" in text)
+
+            # gateway, sleep 30: times out, transcript and message still redacted.
+            mode["v"] = "gateway"
+            with patch.dict(os.environ, {"SLEEP_SECONDS": "30"}):
+                rc, text = fresh_run("gw sleep30")
+                t = read_transcript()
+                expect("claude: gw sleep30 rc None", rc is None)
+                expect("claude: gw sleep30 text starts",
+                       text.startswith(f"model did not finish within 2s"))
+                expect("claude: gw sleep30 transcript no key", fake not in t)
+                expect("claude: gw sleep30 transcript has [REDACTED]", "[REDACTED]" in t)
+                expect("claude: gw sleep30 text no key", fake not in text)
+                expect("claude: gw sleep30 text has [REDACTED]", "[REDACTED]" in text)
+
+            # default, sleep 0: unchanged path, the key is left in the transcript.
+            mode["v"] = "default"
+            with patch.dict(os.environ, {"SLEEP_SECONDS": "0"}):
+                rc, text = fresh_run("default sleep0")
+                t = read_transcript()
+                expect("claude: default sleep0 rc 0", rc == 0)
+                expect("claude: default sleep0 transcript has key", fake in t)
+
+            # default, sleep 30: times out with the plain message.
+            mode["v"] = "default"
+            with patch.dict(os.environ, {"SLEEP_SECONDS": "30"}):
+                rc, text = fresh_run("default sleep30")
+                expect("claude: default sleep30 rc None", rc is None)
+                expect("claude: default sleep30 text exact",
+                       text == "model did not finish within 2s")
+
+            # The atomic-write temp files are always moved into place: none left.
+            leftovers = [n for n in os.listdir(tmp) if n.startswith(".transcript-redact-")]
+            expect("claude: no redact temp files left", leftovers == [])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def run_checker(text, *flags):
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
         f.write(text)
@@ -191,5 +368,6 @@ if __name__ == "__main__":
     test_logging()
     test_checker()
     test_said_done()
+    test_gateway()
     print(f"\n{failures} failure(s)")
     sys.exit(1 if failures else 0)
