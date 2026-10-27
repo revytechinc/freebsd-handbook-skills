@@ -65,6 +65,23 @@ WORK = os.path.join(ROOT, ".work")
 MODEL = os.environ.get("HB_MODEL", "claude-haiku-4-5-20251001")
 BUDGET = os.environ.get("HB_BUDGET_USD", "2.00")
 MODEL_TIMEOUT = int(os.environ.get("HB_MODEL_TIMEOUT", "3600"))
+# HB_GATEWAY selects the transport for the model under test. Empty (the default)
+# keeps the classic Anthropic path exactly as before. "dgx" routes the model
+# through the DGX LiteLLM gateway as its "default" model (see model_argv_env()).
+HB_GATEWAY = os.environ.get("HB_GATEWAY", "")
+# The bearer key is read from here at run time. It is passed only to the model
+# process (model_argv_env() puts it in the env); in gateway mode it is
+# redacted from the stored --verbose stderr and from the stream-json
+# transcript before either is written, so it is never left on disk
+# (see dgx_gateway_env()). Overridable with HB_DGX_KEY_FILE.
+DGX_KEY_FILE = os.path.expanduser(os.environ.get("HB_DGX_KEY_FILE",
+                                                 "~/.creds/dgx-mlapointe/litellm-key"))
+# The DGX gateway base URL (ANTHROPIC_BASE_URL). Fixed on purpose: the bearer
+# key is sent there, so the environment must not be able to redirect it.
+DGX_URL = "https://dgx.cloudbsd.org"
+# The model name recorded in result.json / the verdict when routed over the
+# gateway: Claude Code's "sonnet" is mapped to the gateway's "default" model.
+DGX_MODEL = "dgx-mlapointe/default"
 
 SYSTEM = """You are operating one FreeBSD test machine. The ONLY way to act on it is
 the run_on_target tool, which runs one shell command as root on that machine.
@@ -90,6 +107,59 @@ class HarnessError(Exception):
 def die(msg, code=2):
     print(f"run-skill: {msg}", file=sys.stderr)
     sys.exit(code)
+
+
+def dgx_gateway_env():
+    """The subprocess environment for the gateway model: a copy of the current
+    environment plus the six LiteLLM variables that make Claude Code reach the
+    DGX gateway (its "default" model) instead of Anthropic, over DGX_URL. The
+    bearer key is read from the key file at run time. It is passed only to the
+    model process; model_argv_env() puts it in the env, and in gateway mode the
+    key is redacted from the model's --verbose stderr and from the stream-json
+    transcript before either is written, so it is never left on disk. If the
+    key cannot be read or is empty, the run stops."""
+    try:
+        with open(DGX_KEY_FILE) as f:
+            key = f.read().strip()
+    except OSError as e:
+        die(f"cannot read the DGX gateway key at {DGX_KEY_FILE}: {e}")
+    if not key:
+        die("the DGX gateway key at {path} is empty; refusing to run".format(path=DGX_KEY_FILE))
+    env = dict(os.environ)
+    # A provider selector left in the environment would win over
+    # ANTHROPIC_BASE_URL and route the model somewhere other than the gateway.
+    for var in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"):
+        env.pop(var, None)
+    env.update({
+        "ANTHROPIC_BASE_URL": DGX_URL,
+        "ANTHROPIC_AUTH_TOKEN": key,
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "default",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "default",
+        "ANTHROPIC_SMALL_FAST_MODEL": "default",
+    })
+    return env
+
+
+def model_argv_env():
+    """(the --model argument, and the subprocess env) for the model under test.
+
+    With HB_GATEWAY empty (the default) this is unchanged: MODEL, and None for the
+    env, so subprocess.run inherits the environment exactly as before. With
+    HB_GATEWAY=dgx the model is the gateway's "default"; Claude Code is told to
+    ask for "sonnet" (mapped to "default" by the environment) and is given the
+    gateway variables. An unknown HB_GATEWAY value is refused."""
+    if not HB_GATEWAY:
+        return MODEL, None
+    if HB_GATEWAY != "dgx":
+        die(f"unknown HB_GATEWAY {HB_GATEWAY!r}; the only value is 'dgx'")
+    return "sonnet", dgx_gateway_env()
+
+
+def recorded_model():
+    """The model name written to result.json and the verdict: DGX_MODEL when the
+    model is routed over the gateway, otherwise HB_MODEL (MODEL)."""
+    return DGX_MODEL if HB_GATEWAY == "dgx" else MODEL
 
 
 def load_target(name):
@@ -137,6 +207,101 @@ def reset(target, name):
         die(f"{name} did not come back with its marker after the reset")
 
 
+# A model run over the gateway prints the key Claude Code was given: the
+# Authorization: Bearer header, or the bare value, may show up in --verbose
+# stderr and in the stream-json stdout. A redacted header is left exactly
+# "Authorization: Bearer [REDACTED]", whose token ([REDACTED]) contains no
+# space/quote, so this pattern still matches and rewrites it to the same thing.
+AUTH_RE = re.compile(r"(?i)Authorization:\s*Bearer\s*[^\s'\x22]*")
+
+
+def redact(text, secrets):
+    """Every non-empty string in secrets is replaced throughout by [REDACTED],
+    and each Authorization: Bearer header becomes "Authorization: Bearer
+    [REDACTED]" (its token runs to the next space or quote, matched
+    case-insensitively). Secret replacement first: the key itself, carried in a
+    header, already becomes [REDACTED] and the header rule leaves it as such."""
+    out = text
+    for secret in secrets:
+        if secret:
+            out = out.replace(secret, "[REDACTED]")
+    return AUTH_RE.sub("Authorization: Bearer [REDACTED]", out)
+
+
+def _captured_text(captured):
+    """Decode what TimeoutExpired carries in .stdout/.stderr: bytes (decode
+    with errors="replace") or None (treated as "")."""
+    if captured is None:
+        return ""
+    return captured.decode(errors="replace") if isinstance(captured, bytes) else captured
+
+
+def _write_transcript(transcript_path, text, key):
+    """Write text to transcript_path with the bearer key redacted, via a temp
+    file atomically moved into place, so nothing unredacted is left on disk
+    while writing (gateway mode)."""
+    folder = os.path.dirname(transcript_path) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".transcript-redact-", dir=folder)
+    try:
+        with os.fdopen(fd, "w") as out:
+            out.write(redact(text, [key]))
+        os.replace(tmp, transcript_path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+
+def _timeout_tail(message, captured_stderr, key):
+    """The timeout message: the captured stderr (bytes or text) is appended if
+    present, and if a key is given the whole tail is redacted (gateway mode)."""
+    tail = message
+    if captured_stderr:
+        err = _captured_text(captured_stderr)
+        tail = f"{tail}; stderr: {err[-2000:]}"
+    return redact(tail, [key]) if key else tail
+
+
+def run_claude(prompt, cfg, allowed_tool, cwd, transcript_path):
+    """Run the model under test with claude -p, allowed only allowed_tool
+    (the one-tool MCP server in cfg), in cwd, writing its stream-json
+    transcript to transcript_path. In the default Anthropic path the stream-json
+    is written straight to the transcript, unredacted; in gateway mode the
+    stdout is captured in a pipe, redacted of the bearer key, and only then
+    written to the transcript, and the stderr tail is redacted too. Returns
+    (returncode, stderr tail), or (None, a "did not finish" message) on a
+    timeout."""
+    model_arg, env = model_argv_env()
+    argv = ["claude", "-p", "--model", model_arg, "--setting-sources", "", "--tools", "",
+            "--mcp-config", cfg, "--strict-mcp-config",
+            "--allowedTools", allowed_tool, "--permission-mode", "dontAsk",
+            "--max-budget-usd", BUDGET, "--output-format", "stream-json", "--verbose",
+            "--system-prompt", SYSTEM, prompt]
+    run_kwargs = {"env": env} if env is not None else {}
+    if env is None:
+        # Default Anthropic path, exactly as before: the stream-json goes straight
+        # to the transcript, unredacted, and only the stderr tail is returned.
+        with open(transcript_path, "w") as out:
+            try:
+                p = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out,
+                                   stderr=subprocess.PIPE, text=True, timeout=MODEL_TIMEOUT, **run_kwargs)
+            except subprocess.TimeoutExpired:
+                return None, _timeout_tail(f"model did not finish within {MODEL_TIMEOUT}s", None, "")
+        return p.returncode, p.stderr[-2000:]
+    # Gateway mode: capture the stdout in a pipe so a key printed by the model
+    # never sits on disk while it runs; redact it, then write only the redacted
+    # transcript, and redact the stderr tail.
+    key = env["ANTHROPIC_AUTH_TOKEN"]
+    try:
+        p = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, text=True, timeout=MODEL_TIMEOUT, **run_kwargs)
+    except subprocess.TimeoutExpired as e:
+        _write_transcript(transcript_path, _captured_text(e.stdout), key)
+        return None, _timeout_tail(f"model did not finish within {MODEL_TIMEOUT}s", e.stderr, key)
+    _write_transcript(transcript_path, p.stdout, key)
+    return p.returncode, redact(p.stderr[-2000:], [key])
+
+
 def run_model(skill_text, inputs, target, name, log_path, transcript_path):
     mcp = {"mcpServers": {"target": {
         "type": "stdio", "command": sys.executable,
@@ -150,18 +315,7 @@ def run_model(skill_text, inputs, target, name, log_path, transcript_path):
                   "=== SKILL ===\n" + skill_text + "\n=== END OF SKILL ===")
         if inputs:
             prompt += "\n\nUse these values for the skill's inputs:\n" + inputs
-        argv = ["claude", "-p", "--model", MODEL, "--setting-sources", "", "--tools", "",
-                "--mcp-config", cfg, "--strict-mcp-config",
-                "--allowedTools", "mcp__target__run_on_target", "--permission-mode", "dontAsk",
-                "--max-budget-usd", BUDGET, "--output-format", "stream-json", "--verbose",
-                "--system-prompt", SYSTEM, prompt]
-        with open(transcript_path, "w") as out:
-            try:
-                p = subprocess.run(argv, cwd=empty, stdin=subprocess.DEVNULL, stdout=out,
-                                   stderr=subprocess.PIPE, text=True, timeout=MODEL_TIMEOUT)
-                return p.returncode, p.stderr[-2000:]
-            except subprocess.TimeoutExpired:
-                return None, f"model did not finish within {MODEL_TIMEOUT}s"
+        return run_claude(prompt, cfg, "mcp__target__run_on_target", empty, transcript_path)
 
 
 def model_error(transcript_path):
@@ -242,18 +396,7 @@ def run_model_console(skill_text, inputs, target, log_path, transcript_path):
                   "=== SKILL ===\n" + skill_text + "\n=== END OF SKILL ===")
         if inputs:
             prompt += "\n\nUse these values for the skill's inputs:\n" + inputs
-        argv = ["claude", "-p", "--model", MODEL, "--setting-sources", "", "--tools", "",
-                "--mcp-config", cfg, "--strict-mcp-config",
-                "--allowedTools", "mcp__console__console", "--permission-mode", "dontAsk",
-                "--max-budget-usd", BUDGET, "--output-format", "stream-json", "--verbose",
-                "--system-prompt", SYSTEM, prompt]
-        with open(transcript_path, "w") as out:
-            try:
-                p = subprocess.run(argv, cwd=empty, stdin=subprocess.DEVNULL, stdout=out,
-                                   stderr=subprocess.PIPE, text=True, timeout=MODEL_TIMEOUT)
-                return p.returncode, p.stderr[-2000:]
-            except subprocess.TimeoutExpired:
-                return None, f"model did not finish within {MODEL_TIMEOUT}s"
+        return run_claude(prompt, cfg, "mcp__console__console", empty, transcript_path)
 
 
 def input_value(inputs, key):
@@ -413,7 +556,7 @@ def main_console(skill, target, name, skill_dir, do_reset):
     if v.returncode not in (0, 1, 3, 4):
         die(f"console verify could not run on {name}: {v.stderr.strip()[-300:]}; run: {run_dir}")
     result = {"skill": os.path.relpath(skill_dir, ROOT), "target": name, "release": target.get("release"),
-              "model": MODEL, "time_utc": stamp, "inputs": "(see test-inputs.txt)", "report_only": False,
+              "model": recorded_model(), "time_utc": stamp, "inputs": "(see test-inputs.txt)", "report_only": False,
               "already_satisfied_before": False, "verify_before": "(reset exited 0; the audit requires the installer's first question in the log)",
               "model_exit": rc, "model_stderr": err, "model_finished": model_ok, "model_said_done": done,
               "verify_exit": v.returncode, "verify_stdout": v.stdout[-4000:], "verify_stderr": v.stderr[-2000:],
@@ -739,7 +882,7 @@ def main():
     run_dir = os.path.join(WORK, "runs", f"{stamp}-{os.path.basename(skill_dir)}-{name}")
     os.makedirs(run_dir)
     result = {"skill": os.path.relpath(skill_dir, ROOT), "target": name, "release": target.get("release"),
-              "model": MODEL, "time_utc": stamp, "inputs": skill["inputs"], "report_only": skill["report_only"],
+              "model": recorded_model(), "time_utc": stamp, "inputs": skill["inputs"], "report_only": skill["report_only"],
               "already_satisfied_before": before.returncode == 0, "verify_before": before.stdout[-1000:]}
     result.update(run_once(skill, target, name, run_dir, stamp, expected_before))
     sys.exit(report(result, run_dir))
