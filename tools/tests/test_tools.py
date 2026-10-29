@@ -124,6 +124,33 @@ def test_said_done():
     expect("verdict: verified", rs.verdict(base) == ("VERIFIED", 0))
     expect("verdict: answer missing is not verified", rs.verdict({**base, "verified": False})[1] == 1)
     expect("verdict: pre-existing end state", rs.verdict({**base, "already_satisfied_before": True})[1] == 3)
+    # A run in which the model ran nothing on the target did not test the skill.
+    untried = {**base, "verified": False, "commands_run": 0}
+    expect("verdict: no command run is NOT TESTED, exit 2", rs.verdict(untried)[1] == 2
+           and rs.verdict(untried)[0].startswith("NOT TESTED"), str(rs.verdict(untried)))
+    expect("verdict: commands run and not verified is still exit 1",
+           rs.verdict({**untried, "commands_run": 3})[1] == 1)
+    expect("verdict: verified with no command count is VERIFIED", rs.verdict({**base, "commands_run": 0})[1] == 0)
+    expect("verdict: no commands_run key (console run) keeps exit 1", rs.verdict({**base, "verified": False})[1] == 1)
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, "commands.jsonl")
+        with open(log, "w") as f:
+            f.write('{"event": "start", "command": "a"}\n{"event": "end", "command": "a"}\n'
+                    'not json\n[1, 2]\n"start"\n{"event": "start", "command": "b"}\n')
+        expect("commands_run counts start entries", rs.commands_run(log) == 2, str(rs.commands_run(log)))
+        empty = os.path.join(tmp, "empty.jsonl")
+        open(empty, "w").close()
+        expect("commands_run: empty log is 0", rs.commands_run(empty) == 0)
+        expect("commands_run: missing log is None (unknown)", rs.commands_run(os.path.join(tmp, "none")) is None)
+    expect("verdict: unknown command count keeps exit 1", rs.verdict({**untried, "commands_run": None})[1] == 1)
+    broke = {**untried, "already_satisfied_before": True, "verify_exit": 1}
+    expect("verdict: broke a working state wins over NOT TESTED", rs.verdict(broke)[0].startswith("NOT VERIFIED (verify.sh passed BEFORE"),
+           str(rs.verdict(broke)))
+    with tempfile.TemporaryDirectory() as tmp:
+        bad = os.path.join(tmp, "bad.jsonl")
+        with open(bad, "wb") as f:
+            f.write(b'{"event": "start"}\n\xff\xfe\n')
+        expect("commands_run: undecodable log is None (unknown)", rs.commands_run(bad) is None)
 
 
 def test_gateway():

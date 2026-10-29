@@ -759,6 +759,11 @@ def prepare(target, name, skill_dir, do_reset):
 def verdict(result):
     """(label, exit status) for a run in which the model finished."""
     before, after_ok = result["already_satisfied_before"], result["verify_exit"] == 0
+    if not result["verified"] and result.get("commands_run") == 0 and not (before and not after_ok):
+        # The skill was never tried: the model ran nothing on the target (it
+        # called a tool that does not exist, or stopped at once). That says
+        # nothing about the skill, so it is not counted as a failure of it.
+        return "NOT TESTED (the model ran no command on the target)", 2
     if not result["verified"]:
         broke = before and not after_ok
         return ("NOT VERIFIED (verify.sh passed BEFORE the run and failed after it: "
@@ -977,6 +982,24 @@ def run_report_only(skill, target, said, expected):
     return missing
 
 
+def commands_run(log_path):
+    """How many commands the model started on the target (target_mcp writes a
+    "start" entry before each one), or None when the log cannot be read: an
+    unreadable log is not evidence that nothing ran."""
+    count = 0
+    try:
+        with open(log_path) as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                count += isinstance(entry, dict) and entry.get("event") == "start"
+    except (OSError, UnicodeDecodeError):
+        return None
+    return count
+
+
 def run_once(skill, target, name, run_dir, stamp, expected_before):
     """Run the model on the target and check the result; returns the result dict."""
     log_path, transcript = os.path.join(run_dir, "commands.jsonl"), os.path.join(run_dir, "transcript.jsonl")
@@ -987,12 +1010,13 @@ def run_once(skill, target, name, run_dir, stamp, expected_before):
     model_ok = rc == 0 and said is not None
     done = model_ok and said_done(said)
     unsettled = settle_reboot(target, name, skill["reboots"], booted_before, log_path)
+    ran = commands_run(log_path)
     if skill["report_only"]:
         missing = run_report_only(skill, target, said, expected_before)
         return {"model_exit": rc, "model_stderr": err, "model_finished": model_ok, "model_said_done": done,
                 "verify_exit": None, "verify_stdout": "(report-only skill: no end state to check)",
                 "verify_stderr": "", "expected_answer": expected_before, "answer_missing": missing,
-                "verified": done and not missing}
+                "commands_run": ran, "verified": done and not missing}
     if unsettled:
         after = subprocess.CompletedProcess([], 1, stdout=f"FAIL: {unsettled}", stderr="")
     else:
@@ -1007,7 +1031,7 @@ def run_once(skill, target, name, run_dir, stamp, expected_before):
     return {"model_exit": rc, "model_stderr": err, "model_finished": model_ok, "model_said_done": done,
             "verify_exit": after.returncode, "verify_stdout": after.stdout[-4000:],
             "verify_stderr": after.stderr[-2000:], "expected_answer": expected, "answer_missing": missing,
-            "verified": done and after.returncode == 0 and not missing}
+            "commands_run": ran, "verified": done and after.returncode == 0 and not missing}
 
 
 def main():
