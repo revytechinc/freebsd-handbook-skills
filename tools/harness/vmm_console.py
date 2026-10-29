@@ -25,14 +25,18 @@ Usage:
 """
 import argparse
 import base64
+import contextlib
 import hashlib
 import os
 import select
 import shlex
+import signal
 import socket
 import ssl
 import subprocess
 import sys
+import termios
+import tty
 from urllib.parse import urlsplit
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -311,13 +315,51 @@ def relay(sock, leftover=b""):
             buf, closed = _drain(sock, buf + chunk)
 
 
+def _exit_on_signal(signum, _frame):
+    sys.exit(128 + signum)
+
+
+@contextlib.contextmanager
+def raw_stdin():
+    """While the block runs, a terminal on stdin is in raw mode, as ssh -tt
+    puts it: each key (an arrow key's escape sequence included) is relayed as
+    it is typed, nothing is echoed locally, and Ctrl-C is a byte for the
+    console, not a signal for the bridge. Output is not post-processed either:
+    the guest's own terminal already sends CR LF. The settings come back on
+    a normal exit, an exception, and SIGTERM or SIGHUP (which become exits
+    143 and 129 so that happens); a SIGKILL cannot be caught and leaves the
+    terminal raw. Not a terminal, or one that is gone: no change."""
+    try:
+        saved = termios.tcgetattr(0) if os.isatty(0) else None
+    except termios.error:
+        saved = None
+    if saved is None:
+        yield
+        return
+    old = {}
+    try:
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            old[sig] = signal.signal(sig, _exit_on_signal)
+        with contextlib.suppress(termios.error):
+            tty.setraw(0, termios.TCSADRAIN)
+        yield
+    finally:
+        with contextlib.suppress(termios.error):  # the terminal may be gone (SIGHUP)
+            termios.tcsetattr(0, termios.TCSADRAIN, saved)
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
+
+
 def main():
     cmd = shlex.split(parse_args().grant_cmd)
     url, ca_path = two_lines(cmd)
     validate_url(url)
     sock, leftover = open_websocket(url, ca_path)
     try:
-        relay(sock, leftover)
+        # The terminal is restored before die() prints, so the message is
+        # not written in raw mode.
+        with raw_stdin():
+            relay(sock, leftover)
     except ValueError as exc:
         die(str(exc))
     finally:

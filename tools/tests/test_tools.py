@@ -10,7 +10,7 @@ Covers:
   - check-public.py: that planted addresses, MACs, e-mail addresses are caught
     and that legitimate text is not.
 """
-import base64, contextlib, hashlib, http.server, importlib.util, io, json, os, select, shutil, socket, ssl, subprocess, sys, tempfile, threading, time, types
+import base64, contextlib, hashlib, http.server, importlib.util, io, json, os, pty, select, shutil, signal, socket, ssl, subprocess, sys, tempfile, termios, threading, time, types
 from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -688,6 +688,54 @@ def _read_bridge(vmm_console, grant_cmd, stdin_data, timeout=10):
     return types.SimpleNamespace(returncode=proc.returncode, stdout=out, stderr=err)
 
 
+def _wait_for(check, seconds):
+    """Poll check() until it is true or seconds pass; return its last value."""
+    deadline = time.monotonic() + seconds
+    while not check() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return check()
+
+
+def _bridge_on_pty(vmm_console, grant_cmd, srv, keys, sig):
+    """Run the bridge with a pty as its stdin, as console_mcp's pexpect does,
+    type keys with no Enter after them, then stop the bridge with signal sig.
+    Returns (raw, seen, echo, restored, code): the pty went raw, what the
+    server received, what was echoed on the pty, whether canonical mode came
+    back, and the bridge's exit status.
+
+    A pty left in canonical mode holds the keys back until a line ends (and
+    echoes them), so an arrow key never reaches the console."""
+    master, slave = pty.openpty()
+    proc = subprocess.Popen([sys.executable, vmm_console, "--grant-cmd", grant_cmd],
+                            stdin=slave, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+
+    def canonical():
+        return bool(termios.tcgetattr(slave)[3] & termios.ICANON)
+
+    def is_raw():
+        return not canonical()
+
+    def keys_arrived():
+        return keys in b"".join(srv.seen)
+
+    try:
+        raw = _wait_for(is_raw, 10)
+        os.write(master, keys)
+        _wait_for(keys_arrived, 3)
+        proc.send_signal(sig)
+        code = proc.wait(timeout=10)
+        restored = canonical()
+        echo = os.read(master, 4096) if select.select([master], [], [], 0)[0] else b""
+        return raw, b"".join(srv.seen), echo, restored, code
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        os.close(slave)
+        os.close(master)
+
+
 def test_vmm_console():
     """The bridge, pointed at a fake TLS websocket, relays the console, pongs a
     ping, and exits 0; it refuses bad URLs, a 403 handshake, and makes no
@@ -737,6 +785,28 @@ def test_vmm_console():
                    f"stdout={result.stdout!r}")
         expect("vmm: the server got a pong", srv.pong.wait(timeout=5))
 
+        # On a terminal the bridge relays each key as typed: an arrow key with
+        # no Enter after it reaches the console unchanged, and the terminal
+        # comes back whether the bridge gets SIGTERM or SIGHUP.
+        keys = b"\x1bOD"
+        tty_srvs = []
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            tty_srv = FakeWS(vmod, server_pem, server_key)
+            tty_srv.start()
+            tty_srv.bound.wait(timeout=5)
+            tty_srvs.append(tty_srv)
+            raw, seen, echo, restored, code = _bridge_on_pty(
+                vmm_console, f"python3 {grant_py} https://127.0.0.1:{tty_srv.port}/console/ticket {ca_pem}",
+                tty_srv, keys, sig)
+            name = signal.Signals(sig).name
+            expect(f"vmm: on a pty ({name}), the bridge switches the terminal to raw mode", raw)
+            expect(f"vmm: on a pty ({name}), an arrow key reaches the console without Enter",
+                   seen == keys, f"seen={seen!r}")
+            expect(f"vmm: on a pty ({name}), typed keys are not echoed locally",
+                   echo == b"", f"echo={echo!r}")
+            expect(f"vmm: {name} restores the terminal's canonical mode", restored)
+            expect(f"vmm: {name} exits {128 + sig}", code == 128 + sig, f"code={code}")
+
         # A bad URL costs no connection: the bridge refuses before it connects.
         bad_srv = FakeWS(vmod, server_pem, server_key)
         bad_srv.start()
@@ -763,6 +833,8 @@ def test_vmm_console():
                f"count={reject.count}")
 
         srv.join(timeout=5)
+        for tty_srv in tty_srvs:
+            tty_srv.join(timeout=5)
         bad_srv.join(timeout=5)
         reject.join(timeout=5)
 
