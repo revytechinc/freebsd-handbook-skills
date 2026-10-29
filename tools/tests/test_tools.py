@@ -10,7 +10,7 @@ Covers:
   - check-public.py: that planted addresses, MACs, e-mail addresses are caught
     and that legitimate text is not.
 """
-import contextlib, http.server, importlib.util, io, json, os, shutil, subprocess, sys, tempfile, threading, time
+import base64, contextlib, hashlib, http.server, importlib.util, io, json, os, select, shutil, socket, ssl, subprocess, sys, tempfile, threading, time, types
 from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -461,6 +461,344 @@ def test_gateway():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def load_harness_mod(name, filename):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(TOOLS, filename))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def generate_certs(tmp):
+    """CA + server cert via openssl (argument list, no shell). The server cert
+    carries IP:127.0.0.1 as a SAN, like the masters' certificates carry their
+    address, so the bridge's full check (CA and hostname) passes. Both certs
+    carry the key usage extensions the client's default verification policy
+    requires."""
+    ca_key = os.path.join(tmp, "ca.key")
+    ca_pem = os.path.join(tmp, "ca.pem")
+    srv_key = os.path.join(tmp, "server.key")
+    srv_csr = os.path.join(tmp, "server.csr")
+    srv_crt = os.path.join(tmp, "server.crt")
+    ext = os.path.join(tmp, "v3.cnf")
+    openssl = ["openssl"]
+    # The client verifies the server cert with its default policy, so the CA
+    # must carry the key usage extensions that make it a usable signing CA.
+    subprocess.run(openssl + ["req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                              "-keyout", ca_key, "-out", ca_pem, "-days", "1",
+                              "-subj", "/CN=Test Console CA",
+                              "-addext", "basicConstraints=critical,CA:TRUE",
+                              "-addext", "keyUsage=critical,digitalSignature,keyCertSign,cRLSign"],
+                   check=True, capture_output=True)
+    subprocess.run(openssl + ["req", "-newkey", "rsa:2048", "-nodes",
+                              "-keyout", srv_key, "-out", srv_csr,
+                              "-subj", "/CN=vmm-console"], check=True, capture_output=True)
+    # The end-entity cert needs digitalSignature + keyEncipherment and the
+    # serverAuth EKU, or verification fails ("CA cert does not include key
+    # usage extension") even though the bridge turned hostname checking off.
+    with open(ext, "w") as f:
+        f.write("[v3_req]\n")
+        f.write("basicConstraints=CA:FALSE\n")
+        f.write("keyUsage=critical,digitalSignature,keyEncipherment\n")
+        f.write("extendedKeyUsage=serverAuth\n")
+        f.write("subjectAltName=IP:127.0.0.1\n")
+    subprocess.run(openssl + ["x509", "-req", "-in", srv_csr, "-CA", ca_pem,
+                              "-CAkey", ca_key, "-CAcreateserial", "-out", srv_crt,
+                              "-days", "1", "-extfile", ext, "-extensions", "v3_req"],
+                   check=True, capture_output=True)
+    return ca_pem, srv_crt, srv_key
+
+
+class FakeWS(threading.Thread):
+    """One-connection TLS websocket server. On connect it does the handshake,
+    sends b"login: " and a ping, echoes each binary frame it receives, and sends
+    a close once it has seen b"quit\r". With reject_status the handshake fails
+    (e.g. 403) and no websocket is opened. build_frame/read_frame are reused from
+    the bridge so the test speaks the exact same wire format.
+
+    run() finishes when the connection closes; closed is set at that point."""
+
+    def __init__(self, vmod, server_pem, server_key, reject_status=None):
+        super().__init__(daemon=True)
+        self.vmod = vmod
+        self.server_pem = server_pem
+        self.server_key = server_key
+        self.reject_status = reject_status
+        self.port = 0
+        self.pong = threading.Event()
+        self.bound = threading.Event()
+        self.seen = []
+        self.closed = threading.Event()
+        self.count = 0
+        self._lock = threading.Lock()
+
+    def run(self):
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(self.server_pem, self.server_key)
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        self.port = srv.getsockname()[1]
+        self.bound.set()
+        srv.listen(1)
+        try:
+            raw, _ = srv.accept()
+            with self._lock:
+                self.count += 1
+            # The real server is TLS from the first byte, so wrap the accepted
+            # socket in TLS BEFORE the handshake, then read the upgrade request
+            # and reply over that same TLS connection (as the bridge does). A
+            # rejected connection replies 4xx over TLS and is done: it is never
+            # served as a websocket.
+            conn = ctx.wrap_socket(raw, server_side=True)
+            try:
+                if not self.handshake(conn):
+                    self.serve(conn)
+            finally:
+                conn.close()
+        finally:
+            srv.close()
+            self.closed.set()
+
+    def handshake(self, conn):
+        # Read the upgrade request over the (already TLS-wrapped) connection.
+        # Returns True if the connection was rejected (4xx); then the handshake
+        # is over and serve() must not run.
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = conn.recv(4096)
+            if not chunk:
+                return False
+            data += chunk
+        key = None
+        for line in data.decode("latin-1").split("\r\n"):
+            if line[:18].lower() == "sec-websocket-key:":
+                key = line.split(":", 1)[1].strip()
+        if self.reject_status is not None:
+            conn.sendall(f"HTTP/1.1 {self.reject_status}\r\n\r\n".encode())
+            return True
+        # Any bytes after the blank line belong to the first websocket frame;
+        # the client parses them from its own buffer, so we need only the accept.
+        digest = hashlib.sha1((key + self.vmod.GUID).encode(), usedforsecurity=False).digest()  # nosec B324 -- RFC 6455 accept value # nosemgrep: home.mlapointe..config.scan-tools.rules.semgrep.python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1 -- RFC 6455 accept value # NOSONAR -- RFC 6455 accept value
+        accept = base64.b64encode(digest).decode()
+        resp = ("HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                f"Sec-WebSocket-Accept: {accept}\r\n\r\n")
+        conn.sendall(resp.encode())
+        return False
+
+    def serve(self, conn):
+        conn.sendall(self.vmod.build_frame(self.vmod.OP_BINARY, b"login: "))
+        conn.sendall(self.vmod.build_frame(self.vmod.OP_PING, b"ping"))
+        # read_frame parses from this buffer (which carries bytes it read past a
+        # full frame) so nothing the server sends is dropped.
+        buf = b""
+        while True:
+            opcode, payload, buf = self.vmod.read_frame(conn, buf)
+            if opcode is None:
+                break
+            if opcode == self.vmod.OP_PONG:
+                self.pong.set()
+            elif opcode == self.vmod.OP_PING:
+                conn.sendall(self.vmod.build_frame(self.vmod.OP_PONG, payload))
+            elif opcode == self.vmod.OP_CLOSE:
+                break
+            elif opcode == self.vmod.OP_BINARY:
+                conn.sendall(self.vmod.build_frame(self.vmod.OP_BINARY, payload))
+                with self._lock:
+                    self.seen.append(payload)
+        self.closed.set()
+
+
+def write_grant_script(tmp):
+    """A script that prints the grant URL then the CA path, one per line."""
+    path = os.path.join(tmp, "grant.py")
+    with open(path, "w") as f:
+        f.write("import sys\nprint(sys.argv[1])\nprint(sys.argv[2])\n")
+    return path
+
+
+class _Noop:
+    """Stand-in for pyte.Screen / pyte.ByteStream, so we can import console_mcp.py
+    (and test its argv builder) without the terminal-emulator package installed."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+
+def _run_bridge_code(vmm_console, grant_cmd, timeout=10):
+    """Run the bridge with no stdin; return its exit code, or None if it timed
+    out, so a hang becomes a failing check rather than a silent pass."""
+    try:
+        proc = subprocess.run([sys.executable, vmm_console, "--grant-cmd", grant_cmd],
+                              input=b"", capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+    return proc.returncode
+
+
+def _read_bridge(vmm_console, grant_cmd, stdin_data, timeout=10):
+    """Run the bridge with stdin kept open, reading stdout until the echo (which
+    contains "quit\\r") or the client exits. Returns a small result object holding
+    returncode, stdout and the stderr bytes the bridge wrote (or None on timeout).
+    Keeping stdin open until the echo is seen stops the client from exiting on EOF
+    before it has relayed, pinged and echoed. The stderr is read by a side thread
+    so its pipe cannot fill and block the client while we read stdout."""
+    proc = subprocess.Popen([sys.executable, vmm_console, "--grant-cmd", grant_cmd],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    err_chunks = []
+
+    def read_stderr():
+        for chunk in iter(lambda: proc.stderr.read(1), b""):
+            err_chunks.append(chunk)
+
+    err_reader = threading.Thread(target=read_stderr, daemon=True)
+    err_reader.start()
+
+    proc.stdin.write(stdin_data)
+    proc.stdin.flush()
+    out = b""
+    # A healthy relay writes the echo and we return as soon as "quit\\r" appears.
+    # A broken relay writes nothing, so bound the read with select() (so read(1)
+    # cannot block forever) plus a wall-clock deadline; the test fails fast
+    # instead of hanging on a bridge that emits no stdout.
+    deadline = time.monotonic() + 3
+    while b"quit\r" not in out:
+        if time.monotonic() > deadline:
+            break
+        ready, _, _ = select.select([proc.stdout], [], [], 0.2)
+        if proc.stdout not in ready:
+            continue
+        # os.read on the descriptor: a buffered read(1) would pull more into
+        # Python's buffer, which select() then cannot see.
+        chunk = os.read(proc.stdout.fileno(), 4096)
+        if not chunk:
+            break
+        out += chunk
+    proc.stdin.close()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        err_reader.join(timeout=2)
+        return None
+    err_reader.join(timeout=timeout + 1)
+    err = b"".join(err_chunks)
+    return types.SimpleNamespace(returncode=proc.returncode, stdout=out, stderr=err)
+
+
+def test_vmm_console():
+    """The bridge, pointed at a fake TLS websocket, relays the console, pongs a
+    ping, and exits 0; it refuses bad URLs, a 403 handshake, and makes no
+    connection attempt for a bad URL."""
+    vmod = load_harness_mod("vmm_console", "harness/vmm_console.py")
+
+    # An untrusted server cannot make the bridge read an unbounded frame: a
+    # header declaring more than MAX_FRAME bytes is refused before any read.
+    class _NoBytes:
+        def recv(self, _n):
+            return b""
+    huge = bytes([0x82, 127]) + (vmod.MAX_FRAME + 1).to_bytes(8, "big")
+    try:
+        vmod.read_frame(_NoBytes(), huge)
+        refused = False
+    except ValueError:
+        refused = True
+    expect("vmm: a frame over MAX_FRAME is refused", refused)
+
+    # A grant URL with a CR/LF or space is refused before any connection, so it
+    # cannot split the upgrade request line.
+    for bad_url in ("https://127.0.0.1:1/console/t\r\nX-Evil: 1", "https://127.0.0.1:1/console/a b"):
+        try:
+            vmod.validate_url(bad_url)
+            refused = False
+        except SystemExit as exc:
+            refused = exc.code not in (0, None)
+        expect(f"vmm: refuses grant URL {bad_url[-12:]!r}", refused)
+    vmm_console = os.path.join(TOOLS, "harness", "vmm_console.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        ca_pem, server_pem, server_key = generate_certs(tmp)
+        grant_py = write_grant_script(tmp)
+
+        # Happy path: a 101 handshake relays "login: ", echoes stdin, pongs, closes.
+        srv = FakeWS(vmod, server_pem, server_key)
+        srv.start()
+        srv.bound.wait(timeout=5)
+        grant_cmd = (f"python3 {grant_py} "
+                     f"https://127.0.0.1:{srv.port}/console/ticket {ca_pem}")
+        result = _read_bridge(vmm_console, grant_cmd, b"type this\r\nquit\r")
+        expect("vmm: exits after the server closes", result is not None, "timed out")
+        if result is not None:
+            expect("vmm: exits 0 after the server's close", result.returncode == 0,
+                   f"rc={result.returncode} err={result.stderr[-160:]!r}")
+            expect("vmm: receives 'login: ' then the echo of what was typed",
+                   b"login: " in result.stdout and b"type this\r\n" in result.stdout,
+                   f"stdout={result.stdout!r}")
+        expect("vmm: the server got a pong", srv.pong.wait(timeout=5))
+
+        # A bad URL costs no connection: the bridge refuses before it connects.
+        bad_srv = FakeWS(vmod, server_pem, server_key)
+        bad_srv.start()
+        bad_srv.bound.wait(timeout=5)
+        bad = (f"http://127.0.0.1:{bad_srv.port}/console/ticket",
+               f"https://127.0.0.1:{bad_srv.port}/no-console/ticket")
+        for url in bad:
+            code = _run_bridge_code(vmm_console, f"python3 {grant_py} {url} {ca_pem}", timeout=10)
+            expect("vmm: http scheme / wrong path exits non-zero", code not in (0, None),
+                   f"code={code}")
+            expect("vmm: no connection attempt for a bad URL", bad_srv.count == 0,
+                   f"count={bad_srv.count}")
+
+        # A non-101 handshake also fails, but the client did connect.
+        reject = FakeWS(vmod, server_pem, server_key, reject_status="403 Forbidden")
+        reject.start()
+        reject.bound.wait(timeout=5)
+        code = _run_bridge_code(vmm_console,
+                                f"python3 {grant_py} https://127.0.0.1:{reject.port}/console/ticket {ca_pem}",
+                                timeout=10)
+        expect("vmm: HTTP 403 instead of 101 exits non-zero", code not in (0, None),
+               f"code={code}")
+        expect("vmm: the client did connect for a 403", reject.count == 1,
+               f"count={reject.count}")
+
+        srv.join(timeout=5)
+        bad_srv.join(timeout=5)
+        reject.join(timeout=5)
+
+
+def test_console_argv():
+    """With CONSOLE_TRANSPORT unset, console_mcp still builds the same ssh argv
+    as before. pyte is only the terminal emulator, so stub it to import the
+    module without that dependency."""
+    try:
+        import pyte  # noqa: F401
+    except ImportError:
+        sys.modules["pyte"] = types.SimpleNamespace(Screen=_Noop, ByteStream=_Noop)
+    mod = load_harness_mod("console_mcp", "harness/console_mcp.py")
+    want = ["-tt", "-o", "BatchMode=yes", "--", "host.example.com", "doas", "vm", "console", "hbinst0"]
+    with patch.object(mod, "HOST", "host.example.com"), patch.object(mod, "VM", "hbinst0"), \
+            patch.object(mod, "LOG", os.path.join(tempfile.gettempdir(), "x.jsonl")), patch.object(mod, "TRANSPORT", ""):
+        expect("console: default transport still builds the ssh argv", mod.ssh_argv() == want)
+        with patch.object(mod.pexpect, "spawn", return_value=object()) as sp:
+            mod.attach()
+        expect("console: default transport spawns ssh with that argv",
+               sp.call_args.args == ("ssh", want), f"{sp.call_args}")
+    # The vmm transport keeps the safety checks: an evidence log and a
+    # disposable installer VM name are still required.
+    for label, vm, log in (("no log", "hbt151u", ""), ("wrong VM name", "hbvm140", os.path.join(tempfile.gettempdir(), "x.jsonl"))):
+        with patch.object(mod, "VM", vm), patch.object(mod, "LOG", log), \
+                patch.object(mod, "TRANSPORT", "vmm"), \
+                patch.dict(os.environ, {"CONSOLE_GRANT_CMD": "true"}), \
+                patch.object(mod.pexpect, "spawn", return_value=object()) as sp:
+            try:
+                mod.attach()
+                refused = False
+            except SystemExit as exc:
+                refused = exc.code not in (0, None)
+        expect(f"console: vmm refuses {label}", refused and sp.call_count == 0)
+
+
 def run_checker(text, *flags):
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
         f.write(text)
@@ -528,5 +866,7 @@ if __name__ == "__main__":
     test_checker()
     test_said_done()
     test_gateway()
+    test_vmm_console()
+    test_console_argv()
     print(f"\n{failures} failure(s)")
     sys.exit(1 if failures else 0)

@@ -477,8 +477,19 @@ PYLIB = os.path.expanduser("~/.local/share/hbskills-pylib")
 def run_model_console(skill_text, inputs, target, log_path, transcript_path):
     """As run_model, but the model's only tool types keys on the installer VM's
     serial console (console_mcp.py) instead of running shell commands."""
-    env = {"CONSOLE_HOST": target["console_host"], "CONSOLE_VM": target["vm"],
+    env = {"CONSOLE_VM": target["vm"],
            "CONSOLE_LOG": log_path, "PYTHONPATH": PYLIB}
+    # CONSOLE_TRANSPORT / CONSOLE_GRANT_CMD select the vmm websocket bridge;
+    # CONSOLE_HOST is only needed for the default ssh/cu console.
+    transport = target.get("console_transport")
+    if transport is not None:
+        env["CONSOLE_TRANSPORT"] = transport
+    grant = target.get("console_grant_cmd")
+    if grant is not None:
+        env["CONSOLE_GRANT_CMD"] = grant
+    host = target.get("console_host")
+    if host is not None:
+        env["CONSOLE_HOST"] = host
     mcp = {"mcpServers": {"console": {
         "type": "stdio", "command": sys.executable,
         "args": [os.path.join(ROOT, "tools", "harness", "console_mcp.py")], "env": env}}}

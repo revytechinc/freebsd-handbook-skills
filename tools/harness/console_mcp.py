@@ -32,6 +32,11 @@ Configuration (environment):
                  installer VMs only)
   CONSOLE_LOG    required: every key sequence and the resulting screen are
                  appended here (JSON lines)
+  CONSOLE_TRANSPORT empty or "vm-bhyve": the ssh/cu console above. "vmm": the
+                 vmm websocket bridge, which needs CONSOLE_GRANT_CMD instead of
+                 CONSOLE_HOST. The ~ refusal applies to both.
+  CONSOLE_GRANT_CMD required when CONSOLE_TRANSPORT=vmm; the command that
+                 prints the one-use grant URL and the CA PEM path
   PYTHONPATH     must let Python import pyte and pexpect
 
 Named keys: <Enter> <Tab> <BTab> <Space> <Esc> <Up> <Down> <Left> <Right>
@@ -44,9 +49,13 @@ import pyte
 HOST = os.environ.get("CONSOLE_HOST", "").strip()
 VM = os.environ.get("CONSOLE_VM", "").strip()
 LOG = os.environ.get("CONSOLE_LOG", "")
+TRANSPORT = os.environ.get("CONSOLE_TRANSPORT", "").strip()
 COLS, ROWS = 80, 25
 QUIET = 2.0       # seconds without output that count as "the screen has settled"
 MAX_WAIT = 120.0  # longest a single call waits for the screen to settle
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+VMM_CONSOLE = os.path.join(HERE, "vmm_console.py")
 
 KEYS = {
     "Enter": "\r", "Tab": "\t", "BTab": "\x1b[Z", "Space": " ", "Esc": "\x1b",
@@ -63,12 +72,32 @@ def die(msg):
     sys.exit(2)
 
 
-if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", HOST):
-    die("CONSOLE_HOST must be the VM host's name (letters, digits, '.' and '-')")
-if not re.fullmatch(r"hbinst[a-z0-9]{1,20}", VM):
-    die(f"CONSOLE_VM must be a disposable installer VM named hbinst..., got {VM!r}")
-if not LOG:
-    die("CONSOLE_LOG is required: every run must leave an evidence trail")
+def ssh_argv():
+    """The vm-bhyve console as argv (no ssh run here): ssh -tt -o BatchMode=yes
+    -- HOST doas vm console VM. Split out so it can be checked without spawning."""
+    return ["-tt", "-o", "BatchMode=yes", "--", HOST, "doas", "vm", "console", VM]
+
+
+def validate_config():
+    """Sanity-check the environment before spawning anything. The ~ refusal is
+    enforced in translate(), for both transports; vmm needs no host or VM name.
+    Empty or "vm-bhyve" keeps today's behaviour exactly."""
+    if TRANSPORT not in ("", "vm-bhyve", "vmm"):
+        die(f"unknown CONSOLE_TRANSPORT {TRANSPORT!r}; use 'vmm', 'vm-bhyve' or leave it empty")
+    if not LOG:
+        die("CONSOLE_LOG is required: every run must leave an evidence trail")
+    if TRANSPORT == "vmm":
+        if not os.environ.get("CONSOLE_GRANT_CMD", "").strip():
+            die("CONSOLE_GRANT_CMD is required when CONSOLE_TRANSPORT=vmm")
+        # The lab's disposable installer guests under vmm are named hbt...
+        if not re.fullmatch(r"(hbinst|hbt)[a-z0-9]{1,20}", VM):
+            die(f"CONSOLE_VM must be a disposable installer VM named hbinst... or hbt..., got {VM!r}")
+        return
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", HOST):
+        die("CONSOLE_HOST must be the VM host's name (letters, digits, '.' and '-')")
+    if not re.fullmatch(r"hbinst[a-z0-9]{1,20}", VM):
+        die(f"CONSOLE_VM must be a disposable installer VM named hbinst..., got {VM!r}")
+
 
 screen = pyte.Screen(COLS, ROWS)
 stream = pyte.ByteStream(screen)
@@ -86,8 +115,17 @@ def log(entry):
 
 
 def attach():
+    """Spawn the console, via ssh (vm-bhyve) or the vmm websocket bridge,
+    according to CONSOLE_TRANSPORT. Validates first so a bad config dies before
+    anything connects."""
     global child
-    child = pexpect.spawn("ssh", ["-tt", "-o", "BatchMode=yes", "--", HOST, "doas", "vm", "console", VM], timeout=5)
+    validate_config()
+    if TRANSPORT == "vmm":
+        child = pexpect.spawn(sys.executable,
+                              [VMM_CONSOLE, "--grant-cmd", os.environ["CONSOLE_GRANT_CMD"]],
+                              timeout=10)
+    else:
+        child = pexpect.spawn("ssh", ssh_argv(), timeout=5)
 
 
 def pump(settle=QUIET, limit=MAX_WAIT):
