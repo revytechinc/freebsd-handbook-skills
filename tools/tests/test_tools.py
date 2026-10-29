@@ -10,7 +10,7 @@ Covers:
   - check-public.py: that planted addresses, MACs, e-mail addresses are caught
     and that legitimate text is not.
 """
-import contextlib, importlib.util, io, os, shutil, subprocess, sys, tempfile, time
+import contextlib, http.server, importlib.util, io, json, os, shutil, subprocess, sys, tempfile, threading, time
 from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -298,6 +298,144 @@ def test_gateway():
             # The atomic-write temp files are always moved into place: none left.
             leftovers = [n for n in os.listdir(tmp) if n.startswith(".transcript-redact-")]
             expect("claude: no redact temp files left", leftovers == [])
+        # 6. gateway_backend(): the concrete model read from the gateway's
+        #    model/info, or "unknown" on any failure. The key passed in (fake)
+        #    is the only thing the server is not shown; it must not appear in
+        #    any value gateway_backend returns.
+        with_default = {"data": [
+            {"model_name": "default", "litellm_params": {"model": "openai/ornith-1.5-35b-a3b"}},
+            {"model_name": "default-mlapointe",
+             "litellm_params": {"model": "openai/ornith-1.5-35b-a3b"}}]}
+        without_default = {"data": [
+            {"model_name": "default", "litellm_params": {"model": "openai/ornith-1.5-35b-a3b"}}]}
+
+        # A threaded 127.0.0.1 server whose body and status are set before each
+        # request, so the five cases run against a real HTTP round trip.
+        class _InfoServer(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(self.server.status_code)
+                self.send_header("Content-Type", "application/json")
+                body = self.server.body_bytes
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass  # keep the test output quiet
+
+        def start_info_server():
+            srv = http.server.HTTPServer(("127.0.0.1", 0), _InfoServer)
+            srv.status_code = 200
+            srv.body_bytes = json.dumps(with_default).encode("utf-8")
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            return srv
+
+        srv = start_info_server()
+        try:
+            with patch.object(rs, "DGX_URL",
+                              f"http://127.0.0.1:{srv.server_address[1]}"):
+                # a) the JSON that has default-mlapointe -> its model.
+                srv.status_code = 200
+                srv.body_bytes = json.dumps(with_default).encode("utf-8")
+                got = rs.gateway_backend(fake)
+                expect("backend: known model returned",
+                       got == "openai/ornith-1.5-35b-a3b", repr(got))
+                # b) the key is only a request header; it never returns.
+                expect("backend: key never appears in return", fake not in got, repr(got))
+
+                # c) a list without default-mlapointe -> unknown.
+                srv.body_bytes = json.dumps(without_default).encode("utf-8")
+                expect("backend: alias absent -> unknown",
+                       rs.gateway_backend(fake) == "unknown")
+
+                # d) HTTP 500 -> unknown.
+                srv.status_code = 500
+                srv.body_bytes = b"boom"
+                expect("backend: HTTP 500 -> unknown",
+                       rs.gateway_backend(fake) == "unknown")
+
+                # e) non-JSON body -> unknown.
+                srv.status_code = 200
+                srv.body_bytes = b"this is not json"
+                expect("backend: non-JSON body -> unknown",
+                       rs.gateway_backend(fake) == "unknown")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+    # f) after_model(): "backend" and its alias go right after "model", and
+        #    are appended at the end when there is no "model" key.
+        ordered = rs.after_model({"skill": "s", "model": "openai/x", "time_utc": "t"}, "openai/backend")
+        keys = list(ordered.keys())
+        expect("after_model: fields right after model",
+                keys == ["skill", "model", "backend", "backend_alias", "time_utc"], keys)
+        expect("after_model: alias recorded", ordered["backend_alias"] == rs.GATEWAY_BACKEND_NAME)
+        appended = rs.after_model({"skill": "s", "time_utc": "t"}, "openai/backend")
+        expect("after_model: fields appended when no model",
+                list(appended.keys())[-2:] == ["backend", "backend_alias"], list(appended.keys()))
+
+        # g) current_backend(): None unless the run routes over the gateway;
+        #    an empty key gives "unknown" without a request.
+        with patch.object(rs, "HB_GATEWAY", ""):
+            expect("current_backend: None when gateway empty", rs.current_backend() is None)
+        with patch.object(rs, "HB_GATEWAY", "dgx"), \
+                patch.object(rs, "dgx_gateway_env", return_value={"ANTHROPIC_AUTH_TOKEN": fake}), \
+                patch.object(rs, "gateway_backend", return_value="openai/backend") as gb:
+            expect("current_backend: routes over dgx",
+                   rs.current_backend() == "openai/backend" and gb.call_args.args == (fake,))
+        with patch.object(rs, "HB_GATEWAY", "dgx"), \
+                patch.object(rs, "dgx_gateway_env", return_value={"ANTHROPIC_AUTH_TOKEN": ""}), \
+                patch.object(rs, "gateway_backend") as gb2:
+            expect("current_backend: empty key unknown without request",
+                   rs.current_backend() == "unknown" and gb2.call_count == 0)
+
+        # h) a 302 redirect is not followed: the request ends "unknown" and the
+        #    target's handler is never reached, so the key is never copied.
+        class _RedirectServer(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/info":
+                    self.server.second_hits += 1
+                    body = json.dumps(with_default).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:%d/info" % self.server.server_address[1])
+                self.end_headers()
+                self.wfile.write(b"")
+            def log_message(self, *a): pass  # keep the test output quiet
+        rsrv = http.server.HTTPServer(("127.0.0.1", 0), _RedirectServer)
+        rsrv.second_hits = 0
+        threading.Thread(target=rsrv.serve_forever, daemon=True).start()
+        try:
+            with patch.object(rs, "DGX_URL", f"http://127.0.0.1:{rsrv.server_address[1]}"):
+                got = rs.gateway_backend(fake)
+                expect("backend: 302 redirect -> unknown", got == "unknown", repr(got))
+                expect("backend: redirect target never reached", rsrv.second_hits == 0, str(rsrv.second_hits))
+        finally:
+            rsrv.shutdown()
+            rsrv.server_close()
+
+        # i) a body shorter than Content-Length raises IncompleteRead, caught as "unknown".
+        class _ShortBodyServer(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                self.wfile.write(b'{"data": []}')
+            def log_message(self, *a): pass  # keep the test output quiet
+        ssrv = http.server.HTTPServer(("127.0.0.1", 0), _ShortBodyServer)
+        threading.Thread(target=ssrv.serve_forever, daemon=True).start()
+        try:
+            with patch.object(rs, "DGX_URL", f"http://127.0.0.1:{ssrv.server_address[1]}"):
+                expect("backend: too-long Content-Length -> unknown",
+                        rs.gateway_backend(fake) == "unknown", repr(rs.gateway_backend(fake)))
+        finally:
+            ssrv.shutdown()
+            ssrv.server_close()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

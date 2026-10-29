@@ -58,7 +58,7 @@ Exit status:
 verify.sh must exit 0 (verified) or 1 (not verified). Any other status,
 including ssh's own 255, is treated as a failure of the run, not a verdict.
 """
-import json, os, re, shlex, subprocess, sys, tempfile, time
+import http.client, json, os, re, shlex, subprocess, sys, tempfile, time, urllib.parse, urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 WORK = os.path.join(ROOT, ".work")
@@ -82,6 +82,11 @@ DGX_URL = "https://dgx.cloudbsd.org"
 # The model name recorded in result.json / the verdict when routed over the
 # gateway: Claude Code's "sonnet" is mapped to the gateway's "default" model.
 DGX_MODEL = "dgx-mlapointe/default"
+# The gateway alias that always runs the same concrete backend as "default":
+# one switch on the gateway rewrites both. gateway_backend() reads this name
+# from the gateway's model/info, so the concrete model is recorded even though
+# the model under test is the alias "default".
+GATEWAY_BACKEND_NAME = "default-mlapointe"
 
 SYSTEM = """You are operating one FreeBSD test machine. The ONLY way to act on it is
 the run_on_target tool, which runs one shell command as root on that machine.
@@ -160,6 +165,85 @@ def recorded_model():
     """The model name written to result.json and the verdict: DGX_MODEL when the
     model is routed over the gateway, otherwise HB_MODEL (MODEL)."""
     return DGX_MODEL if HB_GATEWAY == "dgx" else MODEL
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect handler whose redirect_request always returns None, so any
+    301/302/307/308 becomes an HTTPError (caught below) instead of being
+    followed with the Authorization header copied to the new host."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+        return None
+
+
+def gateway_backend(key):
+    """The concrete model the gateway alias default-mlapointe runs, read from
+    the gateway's model/info, or "unknown" on any failure. It GETs
+    {DGX_URL}/v1/model/info over HTTPS with the bearer key, finds the entry
+    whose model_name is exactly default-mlapointe, and returns its
+    litellm_params.model so runs on different backends can be told apart (the
+    model under test is the alias "default", whose backend the gateway can
+    change at any time). A 20 s timeout bounds the call. It never raises and
+    never carries the key in its return value, exceptions or logs.
+
+    The opener never follows a redirect: a 301/302/307/308 becomes an
+    HTTPError (an OSError, caught here), so the bearer key cannot be copied to
+    another host. IncompleteRead and other http.client errors - a truncated
+    reply, a bad status line - are caught too."""
+    backend = "unknown"
+    try:
+        url = DGX_URL + "/v1/model/info"
+        parts = urllib.parse.urlsplit(url)
+        # Only https, or plain http to this machine (the tests' fake server):
+        # never file:// or another scheme urllib would also open.
+        if not (parts.scheme == "https" or (parts.scheme == "http" and parts.hostname == "127.0.0.1")):
+            return "unknown"
+        req = urllib.request.Request(url, headers={"Authorization": "Bearer " + key})
+        # The scheme is checked just above; the opener does not follow a
+        # redirect, so the bearer key never reaches another host.
+        opener = urllib.request.build_opener(_NoRedirect())
+        with opener.open(req, timeout=20) as resp:  # nosec B310 -- scheme checked, no redirect # nosemgrep: home.mlapointe..config.scan-tools.rules.semgrep.python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- scheme checked, no redirect
+            payload = json.loads(resp.read().decode("utf-8"))
+        data = payload.get("data") if isinstance(payload, dict) else []
+        for entry in data or []:
+            if entry.get("model_name") == GATEWAY_BACKEND_NAME:
+                model = entry.get("litellm_params", {}).get("model")
+                if model:
+                    backend = model
+    except (OSError, ValueError, AttributeError, TypeError, http.client.HTTPException):
+        backend = "unknown"
+    return backend
+
+
+def current_backend():
+    """The concrete gateway backend, or None when the run does not go through
+    the gateway (HB_GATEWAY anything other than "dgx"). In gateway mode the key
+    is read from dgx_gateway_env(); an empty key returns "unknown" without a
+    request, and any other key is passed to gateway_backend()."""
+    if HB_GATEWAY != "dgx":
+        return None
+    key = dgx_gateway_env().get("ANTHROPIC_AUTH_TOKEN", "")
+    if not key:
+        return "unknown"
+    return gateway_backend(key)
+
+
+def after_model(result, backend):
+    """A copy of result with "backend" and "backend_alias" inserted right after
+    "model", so result.json shows the concrete backend beside the recorded
+    model. When the result has no "model" key the fields are appended at the
+    end. Called in gateway mode only; the default path is left untouched."""
+    rebuilt = {}
+    saw_model = False
+    for key, value in result.items():
+        rebuilt[key] = value
+        if key == "model":
+            saw_model = True
+            rebuilt["backend"] = backend
+            rebuilt["backend_alias"] = GATEWAY_BACKEND_NAME
+    if not saw_model:
+        rebuilt["backend"] = backend
+        rebuilt["backend_alias"] = GATEWAY_BACKEND_NAME
+    return rebuilt
 
 
 def load_target(name):
@@ -538,6 +622,9 @@ def main_console(skill, target, name, skill_dir, do_reset):
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     run_dir = os.path.join(WORK, "runs", f"{stamp}-{os.path.basename(skill_dir)}-{name}")
     os.makedirs(run_dir)
+    # Record the concrete gateway backend before the model runs, so it is known
+    # regardless of the model's outcome (default mode is unchanged).
+    backend = current_backend()
     log_path, transcript = os.path.join(run_dir, "commands.jsonl"), os.path.join(run_dir, "transcript.jsonl")
     rc, err = run_model_console(skill["text"], skill["inputs"], target, log_path, transcript)
     err = ((err or "") + " " + model_error(transcript)).strip()
@@ -562,6 +649,8 @@ def main_console(skill, target, name, skill_dir, do_reset):
               "verify_exit": v.returncode, "verify_stdout": v.stdout[-4000:], "verify_stderr": v.stderr[-2000:],
               "expected_answer": [], "answer_missing": [], "verified": done and v.returncode == 0,
               "verify_skipped": off_path}
+    if backend is not None:
+        result = after_model(result, backend)
     sys.exit(report(result, run_dir))
 
 
@@ -884,6 +973,12 @@ def main():
     result = {"skill": os.path.relpath(skill_dir, ROOT), "target": name, "release": target.get("release"),
               "model": recorded_model(), "time_utc": stamp, "inputs": skill["inputs"], "report_only": skill["report_only"],
               "already_satisfied_before": before.returncode == 0, "verify_before": before.stdout[-1000:]}
+    # Record the concrete gateway backend before the model runs, right after
+    # "model", so runs on different backends can be told apart (default mode is
+    # unchanged).
+    backend = current_backend()
+    if backend is not None:
+        result = after_model(result, backend)
     result.update(run_once(skill, target, name, run_dir, stamp, expected_before))
     sys.exit(report(result, run_dir))
 
