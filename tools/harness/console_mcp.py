@@ -123,7 +123,7 @@ def attach():
     if TRANSPORT == "vmm":
         child = pexpect.spawn(sys.executable,
                               [VMM_CONSOLE, "--grant-cmd", os.environ["CONSOLE_GRANT_CMD"]],
-                              timeout=10)
+                              timeout=120)  # the bridge's grant may take up to 90 s
     else:
         child = pexpect.spawn("ssh", ssh_argv(), timeout=5)
 

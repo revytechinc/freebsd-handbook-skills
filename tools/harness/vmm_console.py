@@ -46,7 +46,10 @@ CLOSE_WAIT = 10  # seconds to wait for the server's close after ours
 OP_PING = 0x9
 OP_PONG = 0xA
 
-HTTP_TIMEOUT = 10.0  # seconds the handshake and grant command are allowed
+HTTP_TIMEOUT = 10.0  # seconds the TCP connect and TLS/websocket handshake are allowed
+# The grant command may first have to find the masters' leader; the ticket's
+# own 60 s only starts when the grant is issued, at the end of the command.
+GRANT_TIMEOUT = 90.0
 MAX_HEADERS = 64 * 1024  # bytes of upgrade response headers accepted
 MAX_FRAME = 1 << 20  # bytes in one frame from the (untrusted) server
 
@@ -84,7 +87,7 @@ def two_lines(cmd):
     """Run the grant command and return (url, ca_pem_path). Exactly two lines
     are required: the URL, then the CA path."""
     try:
-        out = subprocess.check_output(cmd, timeout=HTTP_TIMEOUT, text=True)
+        out = subprocess.check_output(cmd, timeout=GRANT_TIMEOUT, text=True)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
         die(f"grant command failed: {e}")
     lines = out.splitlines()

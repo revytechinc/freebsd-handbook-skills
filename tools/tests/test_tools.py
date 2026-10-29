@@ -797,6 +797,30 @@ def test_console_argv():
             except SystemExit as exc:
                 refused = exc.code not in (0, None)
         expect(f"console: vmm refuses {label}", refused and sp.call_count == 0)
+    # console_verify.py's spawn decision is its own transport switch, so it can
+    # be checked without spawning. Default and vmm match console_mcp.py; the
+    # vmm bridge argv names the vmm_console.py next to console_verify.py.
+    cv = load_harness_mod("console_verify", "harness/console_verify.py")
+    want_ssh = ["-tt", "-o", "BatchMode=yes", "--", "host.example.com", "doas", "vm", "console", "hbinst0"]
+    with patch.dict(os.environ, {"CONSOLE_TRANSPORT": ""}):
+        command, args, timeout = cv.choose_transport("host.example.com", "hbinst0")
+    expect("console_verify: default transport builds the ssh argv",
+           command == "ssh" and timeout == 30 and args == want_ssh,
+           f"command={command} args={args} timeout={timeout}")
+    with patch.dict(os.environ, {"CONSOLE_TRANSPORT": "vmm", "CONSOLE_GRANT_CMD": "true"}):
+        command, args, timeout = cv.choose_transport("", "hbinst151u")
+    vmm_console_path = os.path.join(os.path.dirname(os.path.abspath(cv.__file__)), "vmm_console.py")
+    expect("console_verify: vmm transport builds the bridge argv",
+           command == sys.executable and timeout == 120
+           and args == [vmm_console_path, "--grant-cmd", "true"],
+           f"command={command} args={args} timeout={timeout}")
+    with patch.dict(os.environ, {"CONSOLE_TRANSPORT": "bogus"}):
+        try:
+            cv.choose_transport("host.example.com", "hbinst0")
+            unknown = False
+        except SystemExit as exc:
+            unknown = exc.code not in (0, None)
+    expect("console_verify: unknown transport exits non-zero", unknown, "")
 
 
 def run_checker(text, *flags):

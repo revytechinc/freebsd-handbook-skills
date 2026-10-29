@@ -601,10 +601,22 @@ def at_login(screen, hostname):
 
 
 def console_verify(target, verify, pw, name, run_dir):
+    # CONSOLE_TRANSPORT / CONSOLE_GRANT_CMD select the vmm websocket bridge;
+    # CONSOLE_HOST is only needed for the default ssh/cu console.
+    env = dict(os.environ, PYTHONPATH=PYLIB, HBV_ROOTPW=pw)
+    # The target decides the transport: nothing from the caller's environment.
+    env.pop("CONSOLE_TRANSPORT", None)
+    env.pop("CONSOLE_GRANT_CMD", None)
+    transport = target.get("console_transport")
+    if transport is not None:
+        env["CONSOLE_TRANSPORT"] = transport
+    grant = target.get("console_grant_cmd")
+    if grant is not None:
+        env["CONSOLE_GRANT_CMD"] = grant
     try:
         return subprocess.run([sys.executable, os.path.join(ROOT, "tools", "harness", "console_verify.py"),
-                               target["console_host"], target["vm"], verify],
-                              env=dict(os.environ, PYTHONPATH=PYLIB, HBV_ROOTPW=pw),
+                               target.get("console_host", ""), target["vm"], verify],
+                              env=env,
                               capture_output=True, text=True, timeout=2400)
     except subprocess.TimeoutExpired:
         # Longer than console_verify.py's own waits added up (10 min for the

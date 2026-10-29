@@ -118,6 +118,25 @@ def run_script(c, script):
     return rc, "\n".join(lines).strip()
 
 
+def choose_transport(host, vm):
+    """Decide how to attach the console, from CONSOLE_TRANSPORT, so main can
+    build argv without spawning. Empty or 'vm-bhyve' is today's ssh, argv
+    unchanged and HOST still required. 'vmm' is the vmm websocket bridge, which
+    needs CONSOLE_GRANT_CMD and never uses HOST. Any other value exits
+    non-zero with a clear message, before anything is spawned."""
+    transport = os.environ.get("CONSOLE_TRANSPORT", "").strip()
+    if transport in ("", "vm-bhyve"):
+        return ("ssh", ["-tt", "-o", "BatchMode=yes", "--", host, "doas", "vm", "console", vm], 30)
+    if transport == "vmm":
+        if not os.environ.get("CONSOLE_GRANT_CMD", "").strip():
+            fail("CONSOLE_GRANT_CMD is required when CONSOLE_TRANSPORT=vmm")
+        here = os.path.dirname(os.path.abspath(__file__))
+        vmm_console = os.path.join(here, "vmm_console.py")
+        # The bridge may need up to its 90 s grant timeout before any output.
+        return (sys.executable, [vmm_console, "--grant-cmd", os.environ["CONSOLE_GRANT_CMD"]], 120)
+    fail(f"unknown CONSOLE_TRANSPORT {transport!r}; use 'vmm', 'vm-bhyve' or leave it empty")
+
+
 def main():
     if len(sys.argv) != 4:
         fail("usage: HBV_ROOTPW=... console_verify.py HOST VM VERIFY_SH")
@@ -127,15 +146,17 @@ def main():
     # "~" there would be a cu command (~! runs a shell on the host).
     if not re.fullmatch(r"[!-}]{1,128}", pw) or "~" in pw:
         fail("HBV_ROOTPW must be 1 to 128 printable characters, no spaces, no '~'")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", host):
+    # The transport selects the spawn: vmm never uses HOST, so only the ssh
+    # path must accept a host name.
+    command, spawn_args, timeout = choose_transport(host, vm)
+    if command == "ssh" and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", host):
         fail(f"refusing console host {host!r}: a host name only")
     if not re.fullmatch(r"hbinst[a-z0-9]{1,20}", vm):
         fail(f"refusing VM {vm!r}: only disposable installer VMs (hbinst...)")
     script = open(path).read()
     if "~" in script or any(w in script for w in (BEGIN, END, EOF_WORD)):
         fail("verify.sh must not contain '~' or the marker words")
-    c = pexpect.spawn("ssh", ["-tt", "-o", "BatchMode=yes", "--", host, "doas", "vm", "console", vm],
-                      timeout=30, encoding="utf-8", codec_errors="replace")
+    c = pexpect.spawn(command, spawn_args, timeout=timeout, encoding="utf-8", codec_errors="replace")
     wait_for_login(c)
     try:
         login_root(c, pw)
