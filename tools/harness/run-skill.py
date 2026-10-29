@@ -227,11 +227,19 @@ def current_backend():
     return gateway_backend(key)
 
 
-def after_model(result, backend):
+def after_model(result, backend, backend_after=None):
     """A copy of result with "backend" and "backend_alias" inserted right after
     "model", so result.json shows the concrete backend beside the recorded
-    model. When the result has no "model" key the fields are appended at the
-    end. Called in gateway mode only; the default path is left untouched."""
+    model. When backend_after is given, it is recorded right after the alias,
+    plus "backend_changed" (True when the run moved the alias to another
+    backend): a gateway repoint during the run is then visible, and it never
+    changes the verdict. When the result has no "model" key the fields are
+    appended at the end. Called in gateway mode only; the default path is left
+    untouched."""
+    extra = {}
+    if backend_after is not None:
+        extra["backend_after"] = backend_after
+        extra["backend_changed"] = backend != backend_after
     rebuilt = {}
     saw_model = False
     for key, value in result.items():
@@ -240,9 +248,11 @@ def after_model(result, backend):
             saw_model = True
             rebuilt["backend"] = backend
             rebuilt["backend_alias"] = GATEWAY_BACKEND_NAME
+            rebuilt.update(extra)
     if not saw_model:
         rebuilt["backend"] = backend
         rebuilt["backend_alias"] = GATEWAY_BACKEND_NAME
+        rebuilt.update(extra)
     return rebuilt
 
 
@@ -627,6 +637,11 @@ def main_console(skill, target, name, skill_dir, do_reset):
     backend = current_backend()
     log_path, transcript = os.path.join(run_dir, "commands.jsonl"), os.path.join(run_dir, "transcript.jsonl")
     rc, err = run_model_console(skill["text"], skill["inputs"], target, log_path, transcript)
+    # After the model has finished, read the backend again; in gateway mode
+    # "backend_after" and "backend_changed" (true when it differs from the
+    # reading before the run) are recorded beside "model" (default mode is
+    # unchanged).
+    backend_after = current_backend()
     err = ((err or "") + " " + model_error(transcript)).strip()
     said = final_text(transcript)
     model_ok = rc == 0 and said is not None
@@ -650,7 +665,7 @@ def main_console(skill, target, name, skill_dir, do_reset):
               "expected_answer": [], "answer_missing": [], "verified": done and v.returncode == 0,
               "verify_skipped": off_path}
     if backend is not None:
-        result = after_model(result, backend)
+        result = after_model(result, backend, backend_after)
     sys.exit(report(result, run_dir))
 
 
@@ -739,8 +754,14 @@ def report(result, run_dir):
     answer = ""
     if result["expected_answer"]:
         answer = "; answer " + (f"MISSING {result['answer_missing']}" if result["answer_missing"] else "matched")
+    # "backend_changed" exists only in gateway mode; it is true when the backend
+    # read after the run differs from the one read before it. The suffix is
+    # added to the line only; it never changes the verdict above.
+    suffix = ""
+    if result.get("backend_changed"):
+        suffix = f" (backend changed during the run: {result['backend']} -> {result.get('backend_after')})"
     print(f"{label}  {where}; model said {'DONE' if result['model_said_done'] else 'not DONE'}; "
-          f"{verify_word(result)}{answer}; run: {run_dir}")
+          f"{verify_word(result)}{answer}; run: {run_dir}{suffix}")
     return code
 
 
@@ -977,9 +998,14 @@ def main():
     # "model", so runs on different backends can be told apart (default mode is
     # unchanged).
     backend = current_backend()
-    if backend is not None:
-        result = after_model(result, backend)
     result.update(run_once(skill, target, name, run_dir, stamp, expected_before))
+    # After the model has finished, read the backend again; in gateway mode
+    # "backend_after" and "backend_changed" (true when it differs from the
+    # reading before the run) are recorded beside "model", so a gateway
+    # repoint during the run is visible (default mode is unchanged).
+    backend_after = current_backend()
+    if backend is not None:
+        result = after_model(result, backend, backend_after)
     sys.exit(report(result, run_dir))
 
 

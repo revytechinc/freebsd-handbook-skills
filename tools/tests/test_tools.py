@@ -369,9 +369,30 @@ def test_gateway():
         expect("after_model: fields right after model",
                 keys == ["skill", "model", "backend", "backend_alias", "time_utc"], keys)
         expect("after_model: alias recorded", ordered["backend_alias"] == rs.GATEWAY_BACKEND_NAME)
+        # Without backend_after, the "after" and "changed" keys are absent.
+        expect("after_model: no backend_after or backend_changed when not passed",
+                "backend_after" not in ordered and "backend_changed" not in ordered, list(ordered.keys()))
         appended = rs.after_model({"skill": "s", "time_utc": "t"}, "openai/backend")
         expect("after_model: fields appended when no model",
                 list(appended.keys())[-2:] == ["backend", "backend_alias"], list(appended.keys()))
+
+        # f2) With backend_after it goes right after the alias, plus
+        #      "backend_changed" (False when equal, True when the run moved the
+        #      alias). This is recorded only; it never alters the verdict.
+        equal = rs.after_model({"skill": "s", "model": "openai/x", "time_utc": "t"},
+                               "openai/backend", "openai/backend")
+        expect("after_model: equal backend, order after alias",
+               list(equal.keys()) == ["skill", "model", "backend", "backend_alias", "backend_after",
+                                      "backend_changed", "time_utc"], list(equal.keys()))
+        expect("after_model: equal backend, value recorded", equal["backend_after"] == "openai/backend")
+        expect("after_model: equal backend, changed False", equal["backend_changed"] is False)
+        moved = rs.after_model({"skill": "s", "model": "openai/x", "time_utc": "t"},
+                               "openai/backend", "openai/other")
+        expect("after_model: moved backend, value recorded", moved["backend_after"] == "openai/other")
+        expect("after_model: moved backend, changed True", moved["backend_changed"] is True)
+        expect("after_model: moved backend, order after alias",
+               list(moved.keys())[-5:] == ["backend", "backend_alias", "backend_after",
+                                           "backend_changed", "time_utc"], list(moved.keys()))
 
         # g) current_backend(): None unless the run routes over the gateway;
         #    an empty key gives "unknown" without a request.
