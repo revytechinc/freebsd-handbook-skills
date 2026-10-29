@@ -161,6 +161,9 @@ else: stop and report.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 There is no simple undo: portupgrade does not keep the old versions. The log
 `/root/portupgrade.log` can be removed with `rm /root/portupgrade.log`. Build
 tools that were installed stay installed; `ports/pkg-autoremove` removes the

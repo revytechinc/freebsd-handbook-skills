@@ -117,6 +117,9 @@ step 2 (needed to mount it again).
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 4 showed `exit=0`: mount it again with the values written down
 in step 2 (which step 2 checked are safe to use; tried with UFS only):
 

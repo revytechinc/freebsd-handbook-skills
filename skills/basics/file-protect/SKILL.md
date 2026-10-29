@@ -114,6 +114,9 @@ before it can be deleted or renamed.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 4 showed `exit=0`, and while `sysctl -n kern.securelevel` still
 shows `-1` or `0`:
 

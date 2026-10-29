@@ -139,6 +139,9 @@ Run:
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 There is no simple undo: with the options above, portmaster does not keep
 the old versions. The
 build log `/root/portmaster.log` and the list `/root/portmaster-list.txt` can

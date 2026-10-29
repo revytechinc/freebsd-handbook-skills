@@ -149,6 +149,9 @@ then `exit=0`. Otherwise stop and report.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Delete the jail (it does not ask for confirmation):
 
     poudriere jail -d -j JAIL; echo "exit=$?"

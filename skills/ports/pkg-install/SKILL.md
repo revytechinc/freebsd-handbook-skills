@@ -116,6 +116,9 @@ the package is not installed: stop and report.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 3 installed the package. Do NOT undo if it was already installed
 before you started (step 2 said `exit=0`).
 

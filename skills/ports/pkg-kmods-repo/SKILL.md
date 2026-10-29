@@ -91,6 +91,9 @@ is 0, stop and report.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 On 14.2, only if step 3 created the file:
 
     rm /usr/local/etc/pkg/repos/kmods.conf; echo "exit=$?"

@@ -122,6 +122,9 @@ digit, and `exit=0`. Otherwise stop and report the output.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 2 showed that `DIR` did not exist before. Delete the downloaded
 files, then each directory, which `rmdir` removes only if it is empty:
 

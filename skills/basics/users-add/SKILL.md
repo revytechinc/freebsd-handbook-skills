@@ -124,6 +124,9 @@ skill does not run it.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 3 showed `exit=0`: remove the account, its group and its home
 folder (and any mail or scheduled jobs it has since received):
 

@@ -77,6 +77,9 @@ task did not succeed: stop and report.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Lock it again with the skill `ports/pkg-lock`.
 
 ## Release results

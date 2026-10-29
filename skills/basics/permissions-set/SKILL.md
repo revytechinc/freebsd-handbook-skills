@@ -124,6 +124,9 @@ changed something, so say that Undo puts the old permissions back.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 3 showed `exit=0`: put back the three digits written down in step
 2 (OLDMODE below):
 

@@ -103,6 +103,9 @@ different, or there is an error, stop and report the output.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 3 showed that `FILE` did not exist before. Remove the file:
 
     rm FILE; echo "exit=$?"

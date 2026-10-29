@@ -396,6 +396,18 @@ def run_claude(prompt, cfg, allowed_tool, cwd, transcript_path):
     return p.returncode, redact(p.stderr[-2000:], [key])
 
 
+def skill_prompt(where, tool, what, skill_text, inputs):
+    """The prompt for one run. It names the model's one tool exactly as the
+    model sees it (run_claude allows only that tool): a model that is not told
+    guesses a name such as "bash", is refused, and gives up."""
+    prompt = (f"Here is the skill to follow {where}. Follow it exactly.\n"
+              f"Your only tool is {tool}: {what}. There is no other tool.\n\n"
+              "=== SKILL ===\n" + skill_text + "\n=== END OF SKILL ===")
+    if inputs:
+        prompt += "\n\nUse these values for the skill's inputs:\n" + inputs
+    return prompt
+
+
 def run_model(skill_text, inputs, target, name, log_path, transcript_path):
     mcp = {"mcpServers": {"target": {
         "type": "stdio", "command": sys.executable,
@@ -405,11 +417,11 @@ def run_model(skill_text, inputs, target, name, log_path, transcript_path):
         cfg = os.path.join(empty, "mcp.json")
         with open(cfg, "w") as f:
             json.dump(mcp, f)
-        prompt = ("Here is the skill to follow on the test machine. Follow it exactly.\n\n"
-                  "=== SKILL ===\n" + skill_text + "\n=== END OF SKILL ===")
-        if inputs:
-            prompt += "\n\nUse these values for the skill's inputs:\n" + inputs
-        return run_claude(prompt, cfg, "mcp__target__run_on_target", empty, transcript_path)
+        tool = "mcp__target__run_on_target"
+        prompt = skill_prompt("on the test machine", tool,
+                              "it runs one shell command on the test machine and returns its output",
+                              skill_text, inputs)
+        return run_claude(prompt, cfg, tool, empty, transcript_path)
 
 
 def model_error(transcript_path):
@@ -497,11 +509,11 @@ def run_model_console(skill_text, inputs, target, log_path, transcript_path):
         cfg = os.path.join(empty, "mcp.json")
         with open(cfg, "w") as f:
             json.dump(mcp, f)
-        prompt = ("Here is the skill to follow at the test machine's console. Follow it exactly.\n\n"
-                  "=== SKILL ===\n" + skill_text + "\n=== END OF SKILL ===")
-        if inputs:
-            prompt += "\n\nUse these values for the skill's inputs:\n" + inputs
-        return run_claude(prompt, cfg, "mcp__console__console", empty, transcript_path)
+        tool = "mcp__console__console"
+        prompt = skill_prompt("at the test machine's console", tool,
+                              "it types keys at the test machine's serial console and returns the screen",
+                              skill_text, inputs)
+        return run_claude(prompt, cfg, tool, empty, transcript_path)
 
 
 def input_value(inputs, key):

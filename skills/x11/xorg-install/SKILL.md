@@ -149,6 +149,9 @@ USERNAME logs in.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Check whether USERNAME was in the group before step 6:
 
     if [ -f /root/xorg-install-video-before.txt ]; then cut -d: -f4 /root/xorg-install-video-before.txt | tr ',' '\n' | grep -qx USERNAME; echo "exit=$?"; else echo "no record"; fi

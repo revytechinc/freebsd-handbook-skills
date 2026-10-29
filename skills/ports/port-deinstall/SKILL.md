@@ -102,6 +102,9 @@ did not succeed: stop and report.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Build and install it again with `ports/port-install`.
 
 ## Release results

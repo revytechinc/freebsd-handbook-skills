@@ -131,6 +131,9 @@ Report that the user gets the new editor from their next login.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 4 was run (whatever it showed): run step 4's command again with
 OLD (the editor written down in step 3, such as `vi`, which step 3 checked is
 safe to use) in place of `EDITORPATH`.

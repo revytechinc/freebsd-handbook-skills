@@ -109,6 +109,9 @@ Expected: only `exit=1` (the package is no longer installed). If you see
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Reinstall the package with the skill `ports/pkg-install`. Changes that had
 been made to its configuration files are not restored.
 

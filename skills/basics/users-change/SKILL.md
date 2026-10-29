@@ -122,6 +122,9 @@ the old values back.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 4 showed `exit=0`: put back the old values written down in step
 2 (OLDNAME and OLDSHELL below; step 2 already checked they are safe to put
 back, and OLDNAME may be empty). Run:

@@ -134,6 +134,9 @@ installed with when the machine last started:
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 On ZFS only, if the upgraded system has problems: make the snapshot from step 3
 the one that starts next, then restart.
 

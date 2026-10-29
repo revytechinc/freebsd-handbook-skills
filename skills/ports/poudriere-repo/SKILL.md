@@ -148,6 +148,9 @@ with `JAIL` and `TREE` filled in. Otherwise stop and report.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Undo only what this run made. Remove the package only if step 7 showed
 `exit=0`; remove the file only if step 3 showed `exit=0`. If the run stopped
 at step 2 because the package or the file was already there, they are not

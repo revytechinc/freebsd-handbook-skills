@@ -110,6 +110,9 @@ login; programs already running keep their old groups.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 If step 4 ran and showed `exit=0` (this skill created the group), remove the
 group, whether or not step 5 worked:
 

@@ -149,6 +149,9 @@ heading or anywhere else in the report.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 This skill changes nothing on the system; it leaves the file list in
 `/root/pkg-files.txt`, which can be removed with `rm /root/pkg-files.txt`.
 

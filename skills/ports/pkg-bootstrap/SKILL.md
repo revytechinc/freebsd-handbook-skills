@@ -102,6 +102,9 @@ did not succeed. Stop and report the output.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 3 installed pkg. Do NOT undo if pkg was already installed before
 you started (step 2 said `exit=0`): other software may depend on it.
 

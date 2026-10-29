@@ -145,6 +145,9 @@ unmounted (Undo) or the system restarts.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 **If step 6 showed `exit=0`** (it is mounted): first check nothing is using
 it:
 

@@ -111,6 +111,9 @@ succeed: stop and report.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Record the old origin again:
 
     pkg set -y -o NEW:OLD; echo "exit=$?"

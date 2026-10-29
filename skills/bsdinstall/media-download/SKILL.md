@@ -137,6 +137,9 @@ Report where the image is: `/var/tmp/freebsd-media/IMGFILE`.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Remove the folder and everything in it:
 
     rm -r /var/tmp/freebsd-media; echo "exit=$?"

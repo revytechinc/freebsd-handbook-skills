@@ -147,6 +147,9 @@ whether step 5 said `written` (Undo needs to know).
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 5 said `written`, remove the file:
 
     rm /usr/local/etc/X11/xorg.conf.d/00-keyboard.conf; echo "exit=$?"

@@ -81,6 +81,9 @@ report.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Unlock it with the skill `ports/pkg-unlock`.
 
 ## Release results

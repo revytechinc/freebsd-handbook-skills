@@ -84,6 +84,9 @@ did not succeed: stop and report.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Mark it as installed on purpose again:
 
     pkg set -y -A 0 PACKAGE; echo "exit=$?"; pkg query '%n %a' PACKAGE

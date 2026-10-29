@@ -90,6 +90,9 @@ report it.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Reinstall a removed package with the skill `ports/pkg-install`, using the
 names written down in step 2. A package reinstalled that way is marked as
 installed on purpose, not automatically.

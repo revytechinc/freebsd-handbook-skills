@@ -108,6 +108,9 @@ Report that users can now choose the shell: each user runs `chsh -s SHELL`
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 3 showed `exit=0`. First check no account uses the shell:
 
     u=$(pw usershow -a) && echo "pw ok"; printf '%s\n' "$u" | awk -F: -v s='SHELL' '$NF == s { n++ } END { print "users=" n + 0 }'

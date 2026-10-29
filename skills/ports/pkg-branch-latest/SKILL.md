@@ -122,6 +122,9 @@ If both are true, the task succeeded. Otherwise stop and report the output.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 3 created the file. Remove it, then download the Quarterly
 catalogue again (use the **EoL** form on 14.0 to 14.3, as in step 4):
 

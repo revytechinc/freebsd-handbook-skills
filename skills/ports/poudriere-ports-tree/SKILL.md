@@ -119,6 +119,9 @@ and `git+https`, then the branch (`BRANCH` from step 4, or `main`), then
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Remove the branch list (`rm -f /root/poudriere-branches.txt`), and delete the
 ports tree (it does not ask for confirmation):
 

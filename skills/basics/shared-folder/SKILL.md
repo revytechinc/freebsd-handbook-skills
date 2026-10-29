@@ -120,6 +120,9 @@ login (programs already running keep their old groups).
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 4 created the folder. `rmdir` removes it only while it is empty;
 if members have put files in it, they must be moved out first:
 

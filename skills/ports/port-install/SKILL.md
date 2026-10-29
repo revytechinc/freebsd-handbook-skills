@@ -118,6 +118,9 @@ Expected: one line with the name, the version and `PORT`, for example
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Remove the build log (`rm /root/port-build.log`), and remove the program with
 the skill `ports/pkg-delete`, using the name shown in
 step 5. Ports that were built only because this one needed them stay

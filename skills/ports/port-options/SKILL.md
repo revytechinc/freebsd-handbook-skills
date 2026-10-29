@@ -158,6 +158,9 @@ option's line from the port's configuration, then `exit=0`. For
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Remove the line added in step 4 (use the same `NAME_SET` or `NAME_UNSET`
 text):
 

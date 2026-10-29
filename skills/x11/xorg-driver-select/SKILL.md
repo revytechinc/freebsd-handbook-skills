@@ -154,6 +154,9 @@ whether step 5 said `written` and whether step 3 installed the package
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 5 said `written`, remove the file:
 
     rm /usr/local/etc/X11/xorg.conf.d/20-DRIVER.conf; echo "exit=$?"

@@ -136,6 +136,9 @@ file is missing, stop and report the list.
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Remove the list, the log, and the repository (a plain folder, also on ZFS):
 
     rm /usr/local/etc/poudriere.d/JAIL-TREE-pkglist /root/poudriere-bulk.log; rm -rf /usr/local/poudriere/data/packages/JAIL-TREE; echo "exit=$?"

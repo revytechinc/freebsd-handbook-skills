@@ -164,6 +164,9 @@ that graphics hardware).
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 4 added the module (the old value before `->` did not contain
 `MODULE`), take it out of `kld_list` again:
 

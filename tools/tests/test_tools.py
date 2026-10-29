@@ -956,6 +956,56 @@ def test_checker():
     expect("checker refuses an unknown option", rc == 2, out.strip()[-120:])
 
 
+def test_prompt_names_tool():
+    """The model is told the exact name of its one tool, the same name the run
+    allows. (Observed 2026-10-29: models that were not told called "bash", were
+    refused with "No such tool available", and gave up.)"""
+    spec = importlib.util.spec_from_file_location("run_skill_pt", os.path.join(TOOLS, "harness", "run-skill.py"))
+    rs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rs)
+    seen = []
+
+    def fake_run_claude(prompt, cfg, allowed_tool, cwd, transcript_path):
+        seen.append((prompt, allowed_tool))
+        return 0, ""  # the real run_claude returns (returncode, stderr)
+
+    target = {"ssh": "ssh -F /dev/null host.example.com", "vm": "hbt151i"}
+    with patch.object(rs, "run_claude", fake_run_claude):
+        rs.run_model("SKILL TEXT", "", target, "hbvm0", "/dev/null", "/dev/null")
+        rs.run_model_console("SKILL TEXT", "", target, "/dev/null", "/dev/null")
+    want = ["mcp__target__run_on_target", "mcp__console__console"]
+    expect("each run allows one known tool", [a for _, a in seen] == want, f"seen={[a for _, a in seen]}")
+    for prompt, allowed in seen:
+        expect(f"prompt names its tool {allowed}", f"Your only tool is {allowed}:" in prompt,
+               prompt[:200])
+        expect(f"prompt for {allowed} still carries the skill", "SKILL TEXT" in prompt)
+
+
+UNDO_RULE = ("Run this only when someone asks you to reverse the change: it is not one of\n"
+             "the numbered steps, and the skill is done without it.")
+
+
+def test_undo_sections():
+    """Every Undo section that has something to run opens with UNDO_RULE (weak
+    models ran Undo as a last step and undid their own work); one with nothing
+    to run ("None", "Nothing to undo") does not carry it."""
+    import glob
+    import re
+    for path in sorted(glob.glob(os.path.join(TOOLS, "..", "skills", "*", "*", "SKILL.md"))):
+        text = open(path).read()
+        m = re.search(r"^## Undo\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+        if not m:
+            continue
+        body = m.group(1)
+        name = os.path.relpath(path, os.path.join(TOOLS, ".."))
+        rest = body.replace(UNDO_RULE, "", 1).strip()
+        noop = re.match(r"(None|Nothing to undo|There is nothing)", rest)
+        if noop:
+            expect(f"undo: {name} has no rule for a section with nothing to run", UNDO_RULE not in body)
+        else:
+            expect(f"undo: {name} opens with the rule", body.lstrip("\n").startswith(UNDO_RULE))
+
+
 if __name__ == "__main__":
     test_parse()
     test_logging()
@@ -964,5 +1014,7 @@ if __name__ == "__main__":
     test_gateway()
     test_vmm_console()
     test_console_argv()
+    test_prompt_names_tool()
+    test_undo_sections()
     print(f"\n{failures} failure(s)")
     sys.exit(1 if failures else 0)

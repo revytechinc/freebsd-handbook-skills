@@ -124,6 +124,9 @@ for example `nginx-lite 1.30.4,3`. The second is `exit=0`. If you see only
 
 ## Undo
 
+Run this only when someone asks you to reverse the change: it is not one of
+the numbered steps, and the skill is done without it.
+
 Only if step 3 installed the package. This works offline. Remove the package:
 
     pkg delete -y PACKAGE; echo "exit=$?"
